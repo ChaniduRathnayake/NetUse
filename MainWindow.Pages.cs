@@ -162,12 +162,15 @@ public partial class MainWindow
         BillBox.Text = _db.GetInt("billDay", 1).ToString(CultureInfo.CurrentCulture);
         RetBox.Text = _db.GetInt("retention", 90).ToString(CultureInfo.CurrentCulture);
 
-        // schtasks takes a moment: query in the background so startup isn't delayed
+        // schtasks takes a moment: query in the background so startup isn't delayed. A start-up task made by an older
+        // NetUse (which ran NetUse with your own, changeable environment) is replaced by the protected one here.
         SwStartup.IsEnabled = false;
-        Task.Run(StartupTask.IsEnabled).ContinueWith(t => Dispatcher.InvokeAsync(() =>
+        Task.Run(StartupTask.CheckAndUpgrade).ContinueWith(t => Dispatcher.InvokeAsync(() =>
         {
-            SetQuiet(SwStartup, t.IsCompletedSuccessfully && t.Result);
+            var (on, note, problem) = t.IsCompletedSuccessfully ? t.Result : (false, null, false);
+            SetQuiet(SwStartup, on);
             SwStartup.IsEnabled = true;
+            if (note != null) AddAlertRaw(problem ? "Startup error" : "Startup", note, "", "", "", "", 0, 0);
         }));
     }
 

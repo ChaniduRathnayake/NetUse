@@ -56,6 +56,17 @@ public class NetworkMonitor : IDisposable
     public event Action<string, string>? PathSeen;
     private readonly ConcurrentDictionary<string, byte> _paths = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Limits on distinct (host, port) entries. Anything that makes this PC exchange packets with very many addresses
+    /// (a local program, or a device on the same network sending UDP from spoofed sources) would otherwise grow
+    /// memory, the database and the Usage page without end. Past the limit the bytes are still counted, under
+    /// <see cref="OtherHosts"/>.
+    /// </summary>
+    public const int MaxFlowsPerApp = 500, MaxFlows = 20_000;
+    public const string OtherHosts = "Other hosts";
+    private readonly object _flowGate = new();
+    private readonly Dictionary<string, int> _flowsPerApp = new(StringComparer.OrdinalIgnoreCase);
+
     public void Start()
     {
         NetworkChange.NetworkAddressChanged += (_, _) => _local = LoadLocal();
@@ -146,7 +157,7 @@ public class NetworkMonitor : IDisposable
         int port = Services.Pick(proto, rport, lport);
         s.Remote = host; s.RemotePort = rport; s.Proto = proto;
 
-        var acc = _flows.GetOrAdd(new FlowKey(name, host, port, proto, lan), _ => new FlowAcc());
+        var acc = FlowFor(new FlowKey(name, host, port, proto, lan));
         if (sent)
         {
             Interlocked.Add(ref s.Sent, bytes); Interlocked.Add(ref s.PendSent, bytes);
@@ -158,6 +169,39 @@ public class NetworkMonitor : IDisposable
             Interlocked.Add(ref s.Recv, bytes); Interlocked.Add(ref s.PendRecv, bytes);
             Interlocked.Add(ref acc.Recv, bytes);
             if (lan) Interlocked.Add(ref _lanDown, bytes);
+        }
+    }
+
+    /// <summary>The counter for a flow; a new (host, port) beyond the limits is counted under "Other hosts".</summary>
+    private FlowAcc FlowFor(FlowKey key)
+    {
+        if (_flows.TryGetValue(key, out var acc)) return acc;
+        lock (_flowGate)
+        {
+            if (_flows.TryGetValue(key, out acc)) return acc;
+            _flowsPerApp.TryGetValue(key.App, out int n);
+            if (key.Host != OtherHosts && (n >= MaxFlowsPerApp || _flows.Count >= MaxFlows))
+            {
+                key = new FlowKey(key.App, OtherHosts, 0, key.Proto, key.Lan);
+                if (_flows.TryGetValue(key, out acc)) return acc;
+            }
+            acc = new FlowAcc();
+            _flows[key] = acc;
+            _flowsPerApp[key.App] = n + 1;
+            return acc;
+        }
+    }
+
+    private void RemoveFlow(FlowKey key)
+    {
+        lock (_flowGate)
+        {
+            if (!_flows.TryRemove(key, out _)) return;
+            if (_flowsPerApp.TryGetValue(key.App, out int n))
+            {
+                if (n <= 1) _flowsPerApp.Remove(key.App);
+                else _flowsPerApp[key.App] = n - 1;
+            }
         }
     }
 
@@ -222,7 +266,7 @@ public class NetworkMonitor : IDisposable
                 var k = kv.Key;
                 flows.Add(new FlowRow(k.App, k.Host, k.Port, k.Proto, k.Lan, fs, fr));
             }
-            else if (++kv.Value.IdleFlushes > 30) _flows.TryRemove(kv.Key, out _); // keep the map small
+            else if (++kv.Value.IdleFlushes > 30) RemoveFlow(kv.Key); // keep the map small
         }
         try { db.AddUsage(rows, apps, flows, now); }
         catch
@@ -233,7 +277,7 @@ public class NetworkMonitor : IDisposable
             // the per-host flows too (these used to be dropped, so Hosts / traffic types / WAN-LAN lost that interval)
             foreach (var f in flows)
             {
-                var acc = _flows.GetOrAdd(new FlowKey(f.App, f.Host, f.Port, f.Proto, f.Lan), _ => new FlowAcc());
+                var acc = FlowFor(new FlowKey(f.App, f.Host, f.Port, f.Proto, f.Lan));
                 Interlocked.Add(ref acc.Sent, f.Sent); Interlocked.Add(ref acc.Recv, f.Recv);
             }
             throw;

@@ -117,6 +117,44 @@ public partial class MainWindow : Window
         StartWatch();
         if (_db.GetBool("miniGraph", false)) ShowMini(true);
         InitWidgets();
+        StartupSecurityChecks();
+        // verified publishers arrive in the background: redraw the Firewall page when they do (at most every 2 s)
+        _sigTimer.Tick += (_, _) => { _sigTimer.Stop(); if (_page == "Firewall" && IsVisible) RefreshFw(); };
+        Signature.Checked += () => Dispatcher.InvokeAsync(() => { if (!_sigTimer.IsEnabled) _sigTimer.Start(); });
+    }
+
+    private readonly DispatcherTimer _sigTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+
+    /// <summary>Signs of tampering found at start-up; each distinct finding raises one alert.</summary>
+    private void StartupSecurityChecks()
+    {
+        try
+        {
+            if (_db.TamperNote is { } note)
+                AddAlertRaw(_db.TamperSuspicious ? "Tampering" : "Database", note, "", "", "", "", 0, 0);
+
+            // Variables that make elevated .NET programs load someone else's code, or move Windows folders
+            var env = EnvironmentGuard.Findings();
+            string key = string.Join(",", env);
+            if (env.Count > 0 && _db.GetStr("envAlert", "") != key)
+                AddAlertRaw("Tampering", $"Your account's environment variables include {string.Join(", ", env)}. These can make elevated programs load " +
+                    "code or use folders chosen by another program. NetUse's sign-in start ignores them, but if you didn't set them yourself, remove them " +
+                    "(System Properties → Environment Variables) and scan your PC for malware.", "", "", "", "", 0, 0);
+            _db.Set("envAlert", key);
+
+            // A portable copy in a folder that programs without admin rights can change (Downloads, Desktop...)
+            string exe = Environment.ProcessPath ?? "";
+            if (!AdminOnly.File(exe, out var why))
+            {
+                if (_db.GetStr("unsafeFolder", "") != exe)
+                    AddAlertRaw("Unsafe folder", $"NetUse is running from {System.IO.Path.GetDirectoryName(exe)}, which programs without administrator rights can change " +
+                        $"({why}). Such a program could replace NetUse's files there and get administrator rights the next time NetUse starts. " +
+                        "Install NetUse with the installer, or turn on Start with Windows, which keeps a protected copy in Program Files.", "", "", "", "", 0, 0);
+                _db.Set("unsafeFolder", exe);
+            }
+            else _db.Set("unsafeFolder", "");
+        }
+        catch (Exception ex) { App.Log(ex); }
     }
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -253,6 +291,7 @@ public partial class MainWindow : Window
         if (_mini is { IsVisible: true }) _mini.Update(LiveSeries(DashSeconds), s.Down, s.Up);
 
         CheckSpikes();
+        FlushAlertSummaries();
         if (_tick % 10 == 0) SafeFlush();
         if (_tick % 30 == 0) CheckPlan();
         if (_tick % 3600 == 0) _db.Prune(_db.GetInt("retention", 90));
@@ -355,8 +394,9 @@ public partial class MainWindow : Window
     /// <summary>(theme brush key, badge kind, category) for an alert type.</summary>
     private static (string key, string kind, string category) EventStyle(string type) => type switch
     {
-        "New app" or "New location" or "Blocked" or "Remote Desktop" or "Evil twin" => ("Danger", "bad", "Security"),
-        "Spike" or "Speed" or "CPU" or "Memory" or "Data plan" or "New device" or "Hosts file" or "Firewall" => ("Warning", "warn", "Warning"),
+        "New app" or "New location" or "Blocked" or "Remote Desktop" or "Evil twin" or "Tampering" => ("Danger", "bad", "Security"),
+        "Spike" or "Speed" or "CPU" or "Memory" or "Data plan" or "New device" or "Hosts file" or "Firewall"
+            or "Startup error" or "Unsafe folder" or "Database" => ("Warning", "warn", "Warning"),
         _ => ("Info", "info", "Information")
     };
 
@@ -367,19 +407,24 @@ public partial class MainWindow : Window
         "Remote Desktop" => "",
         "Wi-Fi" or "Evil twin" => "",
         "Hosts file" => "",
+        "Tampering" or "Unsafe folder" => "\uEA18",
+        "Startup" or "Startup error" => "\uE7E8",
+        "Database" => "\uE7BA",
         "CPU" or "Memory" => "",
         "Data plan" or "Spike" or "Speed" => "",
         "Firewall" or "Blocked" or "Allowed" => "",
         _ => ""
     };
 
-    private void OnAppSeen(AppStats a) => Dispatcher.InvokeAsync(() =>
+    private void OnAppSeen(AppStats a) => Dispatcher.InvokeAsync(async () =>
     {
         if (!_known.Add(a.Name)) return;
         if (!_db.GetBool("alertNew", true)) return;
         if (_firstRun && (DateTime.Now - _startedAt).TotalSeconds < 120) return; // learning period on first run
         var meta = AppMeta.Get(a.Name, a.Path);
-        AddAlert("New app", $"{meta.Friendly} accessed the network for the first time.", a, a.Sent, a.Recv);
+        // name and company inside the file are just text: say which program file it is and who (if anyone) signed it
+        string sig = await System.Threading.Tasks.Task.Run(() => AppMeta.SignatureNote(a.Path));
+        AddAlert("New app", $"{meta.Friendly} ({meta.Exe}{sig}) accessed the network for the first time.", a, a.Sent, a.Recv);
     });
 
     private void AddAlert(string type, string msg, AppStats? app = null, long sent = 0, long recv = 0)
@@ -390,12 +435,52 @@ public partial class MainWindow : Window
 
     private void AddAlertRaw(string type, string msg, string app, string path, string remote, string proto, long sent, long recv)
     {
+        if (!AlertAllowed(type)) return;
+        RecordAlert(type, msg, app, path, remote, proto, sent, recv);
+    }
+
+    private DateTime _lastBalloon;
+
+    private void RecordAlert(string type, string msg, string app, string path, string remote, string proto, long sent, long recv)
+    {
         _db.AddAlert(type, msg, app, path, remote, proto, sent, recv);
         _alertsVersion++;
-        if (_db.GetBool("notify", true))
+        // one pop-up per few seconds at most: a burst of alerts must not bury the screen (they're all in the list)
+        if (_db.GetBool("notify", true) && (DateTime.UtcNow - _lastBalloon).TotalSeconds >= 4)
+        {
+            _lastBalloon = DateTime.UtcNow;
             try { _tray?.ShowBalloonTip(5000, "NetUse · " + type, msg, System.Windows.Forms.ToolTipIcon.None); } catch { }
+        }
         UpdateAlertBadge();
         if (_page == "Overview" && IsVisible) RefreshFeed();
+    }
+
+    // ============================================================ alert flood control
+    // Programs on this PC or devices on the network can trigger alerts (new app names, new devices...). At most 10 alerts
+    // of one type per minute are recorded one by one; the rest are counted and reported in one summary.
+    private readonly Dictionary<string, (DateTime start, int count, int dropped)> _alertWindow = new();
+
+    private bool AlertAllowed(string type)
+    {
+        var now = DateTime.UtcNow;
+        if (!_alertWindow.TryGetValue(type, out var w) || (now - w.start).TotalSeconds >= 60) w = (now, 0, 0);
+        bool ok = w.count < 10;
+        _alertWindow[type] = ok ? (w.start, w.count + 1, w.dropped) : (w.start, w.count, w.dropped + 1);
+        return ok;
+    }
+
+    private void FlushAlertSummaries()
+    {
+        if (_alertWindow.Count == 0) return;
+        var now = DateTime.UtcNow;
+        foreach (var (type, w) in _alertWindow.ToList())
+        {
+            if ((now - w.start).TotalSeconds < 60) continue;
+            _alertWindow.Remove(type);
+            if (w.dropped > 0)
+                RecordAlert(type, $"{w.dropped} more \"{type}\" alert{(w.dropped == 1 ? " was" : "s were")} raised within the same minute " +
+                    "and not listed one by one. A burst like this can mean a program or a device is generating them on purpose.", "", "", "", "", 0, 0);
+        }
     }
 
     private void UpdateAlertBadge()

@@ -80,7 +80,7 @@ public partial class MainWindow
     }
 
     // ============================================================ new program location
-    private void OnPathSeen(string name, string path) => Dispatcher.InvokeAsync(() =>
+    private void OnPathSeen(string name, string path) => Dispatcher.InvokeAsync(async () =>
     {
         try
         {
@@ -92,8 +92,9 @@ public partial class MainWindow
             if (!_db.GetBool("alertNew", true)) return;
             if (_firstRun && (DateTime.Now - _startedAt).TotalSeconds < 120) return;
             var meta = AppMeta.Get(name, path);
-            AddAlertRaw("New location", $"{meta.Friendly} ran from a new location: {path}. Before, it ran from {before[^1]}. " +
-                                        "Malware often uses the name of a well-known app.", name, path, "", "", 0, 0);
+            string sig = (await System.Threading.Tasks.Task.Run(() => AppMeta.SignatureNote(path))).TrimStart(',', ' ');
+            AddAlertRaw("New location", $"{meta.Friendly} ran from a new location: {path}{(sig.Length > 0 ? $" ({sig})" : "")}. " +
+                                        $"Before, it ran from {before[^1]}. Malware often uses the name of a well-known app.", name, path, "", "", 0, 0);
         }
         catch (Exception ex) { App.Log(ex); }
     });

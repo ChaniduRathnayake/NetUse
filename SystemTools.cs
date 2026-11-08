@@ -87,11 +87,14 @@ public static class Firewall
     /// Which of the given apps still have their NetUse rule in Windows Firewall (via the HNetCfg.FwPolicy2
     /// COM API, language-independent). Null if the firewall API is unavailable.
     /// </summary>
+    // HNetCfg.FwPolicy2 by its CLSID: no lookup of a name that could be redirected in the registry
+    private static Type? PolicyType => Type.GetTypeFromCLSID(new Guid("E2B3C97F-6AE1-41AC-817A-F6F92166D7DD"));
+
     public static HashSet<string>? ExistingRules(IEnumerable<string> names)
     {
         try
         {
-            var t = Type.GetTypeFromProgID("HNetCfg.FwPolicy2");
+            var t = PolicyType;
             if (t == null) return null;
             object policy = Activator.CreateInstance(t)!;
             object rules = t.InvokeMember("Rules", BindingFlags.GetProperty, null, policy, null)!;
@@ -112,7 +115,7 @@ public static class Firewall
     {
         try
         {
-            var t = Type.GetTypeFromProgID("HNetCfg.FwPolicy2");
+            var t = PolicyType;
             if (t == null) return (false, false, "");
             object policy = Activator.CreateInstance(t)!;
             int profiles = Convert.ToInt32(t.InvokeMember("CurrentProfileTypes", BindingFlags.GetProperty, null, policy, null));
@@ -131,45 +134,154 @@ public static class Firewall
 }
 
 // ================================================================ startup
-/// <summary>Start with Windows, elevated, via a scheduled task (no UAC prompt at logon).</summary>
+/// <summary>
+/// Start with Windows, elevated, without a UAC prompt at sign-in.
+///
+/// The scheduled task runs as SYSTEM and only starts NetUse in your session (see <see cref="Launcher"/>): a task
+/// running NetUse as you would hand the elevated process your environment, which any program running as you can
+/// change. The task only ever points at %ProgramFiles%\NetUse\NetUse.exe, after checking that only
+/// administrators can change that file, its DLLs and its folders. A NetUse running from anywhere else (portable
+/// folder, a build folder) first copies itself there, so rebuilding or swapping the files you run from never changes
+/// what starts elevated at sign-in.
+/// </summary>
 public static class StartupTask
 {
-    public static bool IsEnabled() => Sys.Run("schtasks", "/Query", "/TN", "NetUse").code == 0;
+    public enum Kind { Off, Current, Legacy }
+    private const string TaskName = "NetUse";
+    private const string TaskNs = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+
+    /// <summary>The only program the elevated logon task ever starts.</summary>
+    public static string CopyPath =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "NetUse", "NetUse.exe");
+
+    /// <summary>Off, the protected task, or a task from an older NetUse (or anyone else) under our name.</summary>
+    public static Kind State()
+    {
+        var (code, xml) = Sys.Run("schtasks", "/Query", "/TN", TaskName, "/XML");
+        if (code != 0) return Kind.Off;
+        try
+        {
+            var doc = new System.Xml.XmlDocument { XmlResolver = null };
+            using (var r = System.Xml.XmlReader.Create(new StringReader(xml.Trim()),
+                       new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Prohibit, XmlResolver = null }))
+                doc.Load(r);
+            var ns = new System.Xml.XmlNamespaceManager(doc.NameTable);
+            ns.AddNamespace("t", TaskNs);
+            string user = doc.SelectSingleNode("//t:Principals/t:Principal/t:UserId", ns)?.InnerText.Trim() ?? "";
+            string cmd = doc.SelectSingleNode("//t:Actions/t:Exec/t:Command", ns)?.InnerText.Trim().Trim('"') ?? "";
+            string args = doc.SelectSingleNode("//t:Actions/t:Exec/t:Arguments", ns)?.InnerText.Trim() ?? "";
+            int actions = doc.SelectNodes("//t:Actions/*", ns)?.Count ?? 0;
+            bool system = user.Equals("S-1-5-18", StringComparison.OrdinalIgnoreCase) || user.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase)
+                          || user.EndsWith(@"\SYSTEM", StringComparison.OrdinalIgnoreCase);
+            bool ours = actions == 1 && SafePath.IsLocalFile(cmd) && PathsEqual(cmd, CopyPath) && args.StartsWith(Launcher.Arg + " ", StringComparison.Ordinal);
+            return system && ours ? Kind.Current : Kind.Legacy;
+        }
+        catch { return Kind.Legacy; }
+    }
 
     /// <summary>
-    /// The elevated logon task only ever points at an exe under Program Files. A task pointing at an exe
-    /// in a user-writable folder (Downloads, Desktop...) would let anyone who can replace that file run
-    /// code as administrator at every logon. The single-file NetUse.exe copies itself to
-    /// %ProgramFiles%\NetUse first, so it can be run from anywhere.
+    /// State for Settings. A task made by an older NetUse (which ran NetUse directly with your environment) is replaced
+    /// by the protected one. Returns (on, a note for an alert or null, whether the note reports a problem).
     /// </summary>
+    public static (bool on, string? note, bool problem) CheckAndUpgrade()
+    {
+        var s = State();
+        if (s != Kind.Legacy) return (s == Kind.Current, null, false);
+        if (Enable(out var err))
+            return (true, "Start with Windows now goes through a protected system task, so other programs can no longer slip code into NetUse when it starts at sign-in.", false);
+        Sys.Run("schtasks", "/Delete", "/TN", TaskName, "/F");
+        return (false, $"Start with Windows was turned off: the old start-up entry could be misused by other programs and couldn't be updated ({err}). Turn it on again in Settings.", true);
+    }
+
     public static bool Enable(out string error)
     {
         error = "";
-        var exe = Environment.ProcessPath ?? "";
-        if (!IsAdminOnly(exe, out _))
+        string target = CopyPath, exe = Environment.ProcessPath ?? "";
+        if (!PathsEqual(exe, target))
         {
             if (!IsSingleFile)
             {
-                error = "Start with Windows is only available when NetUse is installed in Program Files.";
+                error = "Start with Windows needs the published NetUse.exe (or the installed one).";
                 return false;
             }
-            if (!InstallCopy(exe, out exe, out error)) return false;
+            if (!InstallCopy(target, out error)) return false;
         }
         // the copy (or the installed folder) must really be admin-only: checked on its permissions, not its name
-        if (!IsAdminOnly(exe, out var why))
+        if (!IsAdminOnly(target, out var why))
         {
-            error = $"{Path.GetDirectoryName(exe)} can be changed without administrator rights ({why}), so NetUse won't run it elevated at sign-in.";
+            error = $"{Path.GetDirectoryName(target)} can be changed without administrator rights ({why}), so NetUse won't run it elevated at sign-in.";
             return false;
         }
-        var (code, o) = Sys.Run("schtasks", "/Create", "/TN", "NetUse", "/TR", $"\"{exe}\" --minimized",
-            "/SC", "ONLOGON", "/RL", "HIGHEST", "/F");
-        if (code != 0) error = o.Trim();
-        return code == 0;
+        using var me = System.Security.Principal.WindowsIdentity.GetCurrent();
+        if (me.User == null) { error = "Couldn't identify your account."; return false; }
+
+        // The task definition goes through a file in the admin-only data folder, so no one can swap it before schtasks reads it.
+        string file = Path.Combine(Database.Dir, "startup-task.xml");
+        try
+        {
+            File.WriteAllText(file, TaskXml(target, me.User.Value, me.Name), System.Text.Encoding.Unicode);
+            var (code, o) = Sys.Run("schtasks", "/Create", "/TN", TaskName, "/XML", file, "/F");
+            if (code != 0) error = o.Trim();
+            return code == 0;
+        }
+        catch (Exception ex) { error = ex.Message; return false; }
+        finally { try { File.Delete(file); } catch { } }
     }
+
+    private static string X(string s) => System.Security.SecurityElement.Escape(s) ?? "";
+
+    /// <summary>Runs as SYSTEM when you sign in; NetUse then starts itself in your session (see Launcher).</summary>
+    private static string TaskXml(string exe, string sid, string account) => $"""
+        <?xml version="1.0" encoding="UTF-16"?>
+        <Task version="1.2" xmlns="{TaskNs}">
+          <RegistrationInfo>
+            <Author>NetUse</Author>
+            <Description>Starts NetUse in the tray when {X(account)} signs in.</Description>
+          </RegistrationInfo>
+          <Triggers>
+            <LogonTrigger>
+              <Enabled>true</Enabled>
+              <UserId>{X(account)}</UserId>
+            </LogonTrigger>
+          </Triggers>
+          <Principals>
+            <Principal id="Author">
+              <UserId>S-1-5-18</UserId>
+              <RunLevel>HighestAvailable</RunLevel>
+            </Principal>
+          </Principals>
+          <Settings>
+            <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+            <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+            <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+            <AllowHardTerminate>true</AllowHardTerminate>
+            <StartWhenAvailable>false</StartWhenAvailable>
+            <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+            <IdleSettings>
+              <StopOnIdleEnd>false</StopOnIdleEnd>
+              <RestartOnIdle>false</RestartOnIdle>
+            </IdleSettings>
+            <AllowStartOnDemand>true</AllowStartOnDemand>
+            <Enabled>true</Enabled>
+            <Hidden>false</Hidden>
+            <RunOnlyIfIdle>false</RunOnlyIfIdle>
+            <WakeToRun>false</WakeToRun>
+            <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+            <Priority>7</Priority>
+          </Settings>
+          <Actions Context="Author">
+            <Exec>
+              <Command>{X(exe)}</Command>
+              <Arguments>{Launcher.Arg} {X(sid)}</Arguments>
+              <WorkingDirectory>{X(Path.GetDirectoryName(exe)!)}</WorkingDirectory>
+            </Exec>
+          </Actions>
+        </Task>
+        """;
 
     public static bool Disable()
     {
-        bool ok = Sys.Run("schtasks", "/Delete", "/TN", "NetUse", "/F").code == 0;
+        bool ok = Sys.Run("schtasks", "/Delete", "/TN", TaskName, "/F").code == 0;
         if (ok) RemoveCopy();
         return ok;
     }
@@ -179,8 +291,11 @@ public static class StartupTask
     private static bool IsSingleFile => string.IsNullOrEmpty(typeof(StartupTask).Assembly.Location);
 #pragma warning restore IL3000
 
-    private static string CopyPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "NetUse", "NetUse.exe");
+    private static bool PathsEqual(string a, string b)
+    {
+        try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
+    }
 
     /// <summary>Native libraries that ship next to NetUse.exe (they are not self-extracted, see NetUse.csproj).</summary>
     public static readonly string[] NativeLibs =
@@ -189,7 +304,8 @@ public static class StartupTask
     private static bool IsOurs(string file)
     {
         string n = Path.GetFileName(file);
-        return n.StartsWith("NetUse.exe", StringComparison.OrdinalIgnoreCase) || NativeLibs.Contains(n, StringComparer.OrdinalIgnoreCase);
+        if (n.EndsWith(".new", StringComparison.OrdinalIgnoreCase)) n = n[..^4]; // left over from an interrupted copy
+        return n.Equals("NetUse.exe", StringComparison.OrdinalIgnoreCase) || NativeLibs.Contains(n, StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>The exe and every DLL it loads from its folder can only be changed by administrators.</summary>
@@ -205,31 +321,51 @@ public static class StartupTask
         return true;
     }
 
-    /// <summary>Copies the running exe and its native DLLs to Program Files (admin-only), replacing an older copy.</summary>
-    private static bool InstallCopy(string src, out string dst, out string error)
+    /// <summary>
+    /// Copies the running NetUse into Program Files (admin-only), replacing an older copy. It copies exactly what is
+    /// running: the files this process mapped, which can't be changed while mapped. Whatever sits in the portable folder
+    /// now is never trusted (any program running as you could have swapped a file there). A DLL that isn't loaded yet
+    /// is only copied if it carries a valid Microsoft signature, checked once it's inside the admin-only folder.
+    /// </summary>
+    private static bool InstallCopy(string dst, out string error)
     {
-        dst = CopyPath;
         error = "";
+        string dir = Path.GetDirectoryName(dst)!;
         try
         {
-            if (!SafePath.IsLocalFile(src)) { error = "NetUse can't start with Windows when it runs from a network location."; return false; }
-            string dir = Path.GetDirectoryName(dst)!, srcDir = Path.GetDirectoryName(src)!;
             // never overwrite part of a full (installer) installation with a portable copy
             if (Directory.Exists(dir) && Directory.EnumerateFileSystemEntries(dir).Any(f => !IsOurs(f)))
             {
                 error = "NetUse is already installed in Program Files. Turn this on from the installed copy.";
                 return false;
             }
+            if (!AdminOnly.Folders(new DirectoryInfo(Path.GetDirectoryName(dir)!), out var why)) { error = why; return false; }
             Directory.CreateDirectory(dir);
+            if (!AdminOnly.Folder(new DirectoryInfo(dir), out why)) { error = why; return false; }
+
+            string srcDir = Path.GetDirectoryName(Environment.ProcessPath!)!;
             foreach (var lib in NativeLibs)
             {
-                string from = Path.Combine(srcDir, lib);
-                if (!File.Exists(from)) continue;
-                string to = Path.Combine(dir, lib);
-                File.Copy(from, to + ".new", true);
-                File.Move(to + ".new", to, true);
+                string to = Path.Combine(dir, lib), tmp = to + ".new";
+                byte[]? loaded = Images.Loaded(lib);
+                if (loaded != null) File.WriteAllBytes(tmp, loaded);
+                else
+                {
+                    string from = Path.Combine(srcDir, lib);
+                    if (!File.Exists(from)) continue;
+                    File.Copy(from, tmp, true);
+                    var sig = Signature.Check(tmp);
+                    if (sig.Status != SigStatus.Valid || !sig.Signer.Equals("Microsoft Corporation", StringComparison.OrdinalIgnoreCase))
+                    {
+                        File.Delete(tmp);
+                        error = $"{lib} next to NetUse.exe isn't the original Microsoft file, so it wasn't copied.";
+                        return false;
+                    }
+                }
+                File.Move(tmp, to, true);
             }
-            File.Copy(src, dst + ".new", true);
+            byte[] exe = Images.Loaded(null) ?? throw new IOException("can't read the running NetUse.exe");
+            File.WriteAllBytes(dst + ".new", exe);
             File.Move(dst + ".new", dst, true);
             return true;
         }
@@ -372,13 +508,15 @@ public static class HostNames
             string name = "";
             try
             {
-                var lookup = Dns.GetHostEntryAsync(addr);
+                // Just the reverse (PTR) lookup: Dns.GetHostEntry also ran its own unchecked forward lookup and often
+                // took longer than the 4 s budget, so most names were never shown.
+                var lookup = Task.Run(() => Reverse(addr));
                 // observe a late failure after a timeout (otherwise it surfaces as an unobserved task exception)
                 _ = lookup.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
                 if (await Task.WhenAny(lookup, Task.Delay(4000)) == lookup && lookup.IsCompletedSuccessfully)
                 {
-                    name = lookup.Result.HostName;
-                    if (name == ip) name = "";
+                    name = lookup.Result.TrimEnd('.');
+                    if (name == ip || !await PointsBack(name, addr)) name = "";
                 }
             }
             catch { }
@@ -388,6 +526,44 @@ public static class HostNames
             return name;
         }));
     }
+
+    [DllImport("ws2_32.dll")] private static extern int WSAStartup(ushort version, byte[] data);
+    [DllImport("ws2_32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetNameInfoW(byte[] sockaddr, int length, System.Text.StringBuilder host, int hostLength,
+        System.Text.StringBuilder? service, int serviceLength, int flags);
+    private static readonly Lazy<bool> Winsock = new(() => WSAStartup(0x0202, new byte[512]) == 0);
+
+    /// <summary>The reverse-DNS (PTR) name of an address, or "" (blocking; call from a worker thread).</summary>
+    private static string Reverse(IPAddress addr)
+    {
+        _ = Winsock.Value;
+        var sa = new IPEndPoint(addr, 0).Serialize();
+        byte[] buf = sa.Buffer.Span[..sa.Size].ToArray();
+        var host = new System.Text.StringBuilder(1025);
+        return GetNameInfoW(buf, buf.Length, host, host.Capacity, null, 0, 0x04 /* NI_NAMEREQD */) == 0 ? host.ToString() : "";
+    }
+
+    /// <summary>
+    /// Whoever controls an address also controls its reverse-DNS (PTR) name, so a server can call itself
+    /// "update.microsoft.com". A name is only shown when it's a plain DNS name that resolves back to the same address.
+    /// </summary>
+    private static async Task<bool> PointsBack(string name, IPAddress addr)
+    {
+        if (name.Length is 0 or > 253 || name.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_'))) return false;
+        try
+        {
+            var lookup = Dns.GetHostAddressesAsync(name);
+            _ = lookup.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            if (await Task.WhenAny(lookup, Task.Delay(4000)) != lookup || !lookup.IsCompletedSuccessfully) return false;
+            var want = Plain(addr);
+            return lookup.Result.Any(a => Plain(a).Equals(want));
+        }
+        catch { return false; }
+    }
+
+    private static IPAddress Plain(IPAddress a) =>
+        a.IsIPv4MappedToIPv6 ? a.MapToIPv4() :
+        a.AddressFamily == AddressFamily.InterNetworkV6 && a.ScopeId != 0 ? new IPAddress(a.GetAddressBytes()) : a;
 }
 
 // ================================================================ connections (IP Helper API)
@@ -614,39 +790,6 @@ public static class DeviceScanner
         mac.Length >= 2 && (Convert.ToByte(mac[..2], 16) & 0x02) != 0;
 }
 
-// ================================================================ Wi-Fi
-public record WifiState(string Ssid, string Bssid, string Auth, string Signal, string Channel, string Radio);
-
-public static class WifiInfo
-{
-    private static readonly Regex Line = new(@"^\s*(?<k>[^:]+?)\s+:\s(?<v>.*)$", RegexOptions.Compiled);
-
-    /// <summary>Current Wi-Fi connection, or null (no Wi-Fi / not connected).</summary>
-    public static WifiState? Read()
-    {
-        (int code, string text) r;
-        try { r = Sys.Run("netsh", "wlan", "show", "interfaces"); } catch { return null; }
-        if (r.code != 0) return null;
-        string ssid = "", bssid = "", auth = "", signal = "", channel = "", radio = "";
-        foreach (var raw in r.text.Split('\n'))
-        {
-            var m = Line.Match(raw.TrimEnd('\r'));
-            if (!m.Success) continue;
-            string k = m.Groups["k"].Value.Trim(), v = m.Groups["v"].Value.Trim();
-            switch (k)
-            {
-                case "SSID": if (ssid.Length == 0) ssid = v; break;
-                case "BSSID": case "AP BSSID": if (bssid.Length == 0) bssid = v.ToUpperInvariant(); break;
-                case "Authentication": if (auth.Length == 0) auth = v; break;
-                case "Signal": signal = v; break;
-                case "Channel": channel = v; break;
-                case "Radio type": radio = v; break;
-            }
-        }
-        return ssid.Length > 0 && bssid.Length > 0 ? new WifiState(ssid, bssid, auth, signal, channel, radio) : null;
-    }
-}
-
 // ================================================================ hardware
 public sealed class HardwareMonitor
 {
@@ -710,6 +853,36 @@ public static class AppMeta
             if (name == "System") { friendly = "Windows system"; publisher = "Microsoft Corporation"; exe = "Windows kernel"; }
             return new AppInfo(friendly, exe, publisher);
         });
+    }
+
+    /// <summary>
+    /// Publisher line for the UI. The company name inside a program file is just text that malware can copy, so it is
+    /// only shown as the publisher when a valid signature confirms it; otherwise it's labelled as a claim.
+    /// </summary>
+    public static string PublisherLabel(string path, string claimed)
+    {
+        if (!SafePath.IsLocalFile(path)) return claimed.Length > 0 ? claimed : "Unknown publisher";
+        var s = Signature.Peek(path);
+        if (s == null) return "Checking signature…";
+        return s.Status switch
+        {
+            SigStatus.Valid => (s.Signer.Length > 0 ? s.Signer : claimed.Length > 0 ? claimed : "Signed") + " (verified)",
+            SigStatus.Invalid => "Signature not valid" + (claimed.Length > 0 ? $" · says {claimed}" : ""),
+            _ => "Unsigned" + (claimed.Length > 0 ? $" · says {claimed}" : "")
+        };
+    }
+
+    /// <summary>", signed by X" / ", unsigned" for alert texts (checks the signature now).</summary>
+    public static string SignatureNote(string path)
+    {
+        if (!SafePath.IsLocalFile(path)) return "";
+        var s = Signature.Check(path);
+        return s.Status switch
+        {
+            SigStatus.Valid => s.Signer.Length > 0 ? $", signed by {s.Signer}" : ", signed",
+            SigStatus.Invalid => ", signature not valid",
+            _ => ", unsigned"
+        };
     }
 }
 

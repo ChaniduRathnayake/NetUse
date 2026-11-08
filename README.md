@@ -57,6 +57,10 @@ Download from the [**Releases**](https://github.com/ChaniduRathnayake/NetUse/rel
 
 > **SmartScreen:** until the releases are code-signed, Windows may show "Windows protected your PC". Click **More info → Run anyway**.
 
+**Check your download:** each release lists the SHA-256 of every file in `NetUse-<version>-SHA256SUMS.txt`. In PowerShell: `Get-FileHash .\NetUse-<version>-portable-win-x64.zip` and compare.
+
+**Portable copy:** NetUse runs as administrator, so keep the portable folder somewhere only administrators can change. Any program running as you can change files in Downloads or on the Desktop, and NetUse warns you if it runs from such a folder. For everyday use, install it, or turn on *Start with Windows*, which keeps a protected copy in Program Files.
+
 ### Where your data is kept
 
 Usage history, alerts and settings are stored in `C:\ProgramData\NetUse` (both packages use the same folder, so you can switch between them). The folder is locked to Administrators and SYSTEM.
@@ -70,23 +74,27 @@ Either way, **allow any apps you blocked on the Firewall page before removing Ne
 
 ## Security
 
-NetUse runs elevated, so it is built to be careful with that:
+NetUse runs elevated. Its threat model is a program running as you *without* administrator rights (or a device on your network) trying to use NetUse to get further. It is built to be careful with that:
 
-- The data folder `%ProgramData%\NetUse` is locked to Administrators and SYSTEM. Planted files, sub-folders and links are removed at startup, and the folder is checked again after it's created, so it can't be swapped in between.
-- Native DLLs are loaded from the program's own folder and are **never unpacked to `%TEMP%`**. A non-admin program could otherwise swap a DLL there and have it run with administrator rights.
-- The elevated *Start with Windows* task only points at a program whose file, DLLs and folders really can only be changed by administrators. That's checked on the actual permissions, not just the folder name. A portable copy first copies itself to `C:\Program Files\NetUse`.
-- The single-instance lock can't be hijacked: a lock created by a non-admin program is ignored, so malware can't keep NetUse from starting.
-- Apps are also tracked by program location, so malware using a well-known app's name from another folder raises a *New location* alert.
+- **Start with Windows** runs as a SYSTEM task that starts NetUse in your session. A task running NetUse as you would hand it your own environment, and any program running as you can add variables there that make the .NET runtime load its DLL (`CORECLR_PROFILER…`) or move Windows folders (`SystemDrive`). NetUse starts with a cleaned environment, and the task only ever points at `C:\Program Files\NetUse\NetUse.exe` after checking that only administrators can change that file, its DLLs and its folders. A portable copy first copies itself there, copying exactly the files it is running from, so a file swapped in the portable folder is never carried over. NetUse also raises a *Tampering* alert when such variables are set for your account.
+- The data folder `%ProgramData%\NetUse` is found without trusting environment variables and is locked to Administrators and SYSTEM. Only Administrators and SYSTEM count as owners: a folder or file created by your own account (which a program running as you can do) is moved aside or removed. Every folder above it must be admin-only too. The folder is checked and fixed through one handle that stays open while NetUse runs, so it can't be swapped for a link between checks.
+- The database only ever holds NetUse's own tables. A view or trigger (someone's SQL planted to run inside NetUse) gets the file set aside with an alert, and every connection runs with SQLite's `trusted_schema=OFF` and DEFENSIVE mode.
+- Native DLLs are loaded from the program's own folder and are **never unpacked to `%TEMP%`**. NetUse's own Windows API calls load DLLs only from System32, and the current folder and `PATH` are never searched for DLLs.
+- The single-instance lock can't be hijacked: a lock created by a non-admin program is ignored. The installer doesn't rely on a lock name either.
+- Apps are tracked by program location, so malware using a well-known app's name from another folder raises a *New location* alert. Publishers are shown only when a valid Authenticode signature confirms them (checked offline, including Windows catalogs). Otherwise the app is labelled *Unsigned* with the name it claims.
+- Host names come from reverse DNS, which the address's owner controls, so a name is shown only if it resolves back to the same address.
+- Tracking is capped per app (beyond 500 hosts, traffic is counted under *Other hosts*) and alerts are rate-limited, so a flood of packets or programs can't fill memory, the disk or your screen.
+- Wi-Fi details come from the Windows Wi-Fi API (works on every Windows language). Network names can't inject text into alerts.
 - System tools (`netsh`, `schtasks`, Task Manager) are always started from System32 by full path. Web links open in your normal, non-elevated browser.
 - Paths read from data are restricted to local drives; network and UNC paths are never touched (reading an icon from `\\host\x.exe` could leak NTLM credentials).
 - Firewall rule names and program paths are validated, and a half-created block is rolled back.
-- .NET startup hooks are disabled, so environment variables can't inject code into the elevated process.
-- CSV export neutralises spreadsheet formulas in app names.
-- Country flags come from a table built into NetUse, so no address is ever sent to a lookup service. Host-name lookups (reverse DNS) can be turned off in Settings.
+- .NET startup hooks are disabled. CSV export neutralises spreadsheet formulas in app names.
+- Country flags come from a table built into NetUse, so no address is ever sent to a lookup service. Host-name lookups can be turned off in Settings.
+- Builds fail on any package with a known moderate or worse vulnerability, and packages come only from nuget.org (`nuget.config`).
 
 ## Build from source
 
-You need the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0). For the installer you also need [Inno Setup](https://jrsoftware.org/isinfo.php) 6.1 or later.
+You need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). For the installer you also need [Inno Setup](https://jrsoftware.org/isinfo.php) 6.1 or later.
 
 ```bat
 build.bat
@@ -95,9 +103,11 @@ build.bat
 `build.bat` does four steps:
 
 1. **Publish:** `dotnet publish -c Release`, which builds a compressed, ReadyToRun, self-contained `NetUse.exe` plus six native DLLs it loads from its own folder. It then copies them to the project folder.
-2. **Sign** (optional): set `NETUSE_SIGN_PFX` and `NETUSE_SIGN_PASS` first to code-sign the exe and installer.
+2. **Sign** (optional): set `NETUSE_SIGN_THUMBPRINT` to the SHA-1 thumbprint of a code-signing certificate in your certificate store (or on a token) to sign `NetUse.exe`, `e_sqlite3.dll` and the installer. The password never goes on a command line; import a `.pfx` once with `Import-PfxCertificate`.
 3. **Portable package:** `setup\Windows\NetUse-<version>-portable-win-x64.zip`.
 4. **Installer:** compiles [`setup/NetUse.iss`](setup/NetUse.iss) into `setup\Windows\NetUse-<version>-setup-win-x64.exe`. It's skipped if Inno Setup isn't found; set `ISCC_PATH` to point at `ISCC.exe` if it's installed somewhere unusual.
+
+It also writes `setup\Windows\NetUse-<version>-SHA256SUMS.txt` for the release page.
 
 The version number comes from `<Version>` in [`NetUse.csproj`](NetUse.csproj). Built files are not committed: publish them as GitHub Release assets.
 
@@ -112,7 +122,10 @@ NetUse is Windows-only. It relies on kernel ETW tracing and Windows Firewall, so
 | `NetworkMonitor.cs` | ETW kernel network trace: per-app, per-host and per-port traffic |
 | `Database.cs` | SQLite store: per-minute usage, daily rollup, hourly flows, alerts, devices |
 | `SystemTools.cs` | Firewall, startup task, connection table, device scan, Wi-Fi, hardware, app icons |
-| `Security.cs` | Secure data folder, admin-only permission checks, single-instance lock, safe-path checks |
+| `Security.cs` | Trusted Windows paths, secure data folder, admin-only permission checks, single-instance lock, safe-path checks |
+| `Program.cs`, `Launcher.cs` | Entry point; the SYSTEM sign-in launcher, environment cleaning and tampering checks |
+| `Trust.cs` | Authenticode signature checks (WinVerifyTrust, catalogs) and copying exactly the running files |
+| `Wifi.cs` | Current Wi-Fi connection through the Native Wifi API |
 | `Widgets.cs` | Taskbar and floating widgets, adapter speed, CPU clock and temperature sensors |
 | `GeoIp.cs`, `Resources/` | Offline IP-to-country lookup and flag images |
 | `AboutWindow.cs` | About NetUse |

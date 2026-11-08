@@ -83,7 +83,7 @@ public partial class MainWindow
                                  + (a.FirstSeen > 0 ? "\nFirst seen  " + Fmt.Time(a.FirstSeen) : "");
 
                 cards.Add((new FwCard(IconCache.Get(a.Path), meta.Friendly, meta.Exe,
-                    meta.Publisher.Length > 0 ? meta.Publisher : "Unknown publisher", a.Path,
+                    AppMeta.PublisherLabel(a.Path, meta.Publisher), a.Path,
                     act, actKind, Fmt.Bytes(a.Recv), Fmt.Bytes(a.Sent),
                     hostCounts.TryGetValue(a.Name, out var hc) ? hc.ToString(CultureInfo.CurrentCulture) : "—",
                     active ? "Now" : Fmt.Relative(a.LastSeen),

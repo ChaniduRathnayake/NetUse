@@ -19,12 +19,23 @@ Speed widgets
 
 Where data is kept
   Usage history and settings: C:\ProgramData\NetUse
-  (this folder can live anywhere: Desktop, Downloads, a USB stick...)
+
+Where to keep this folder
+  NetUse runs as administrator, so any program that can change the files in
+  this folder could get administrator rights the next time NetUse starts.
+  Programs running as you can change Downloads, the Desktop and USB sticks.
+  NetUse works from there, but it warns you. For everyday use, install NetUse
+  or turn on Start with Windows.
 
 Start with Windows
   Settings -> Start with Windows. NetUse copies itself to
   C:\Program Files\NetUse first, because an elevated logon task must
-  only point at a folder that standard users can't change.
+  only point at a folder that standard users can't change. It copies
+  exactly the files it is running from, never whatever is in this folder now.
+
+Check the download
+  NetUse-<version>-SHA256SUMS.txt on the release page lists each file's
+  SHA-256. In PowerShell: Get-FileHash <zip file>   (compare the two)
 
 Remove
   1. Settings -> turn off Start with Windows.

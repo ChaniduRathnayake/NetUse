@@ -1,74 +1,173 @@
 using System;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text.RegularExpressions;
+using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace NetUse;
 
 /// <summary>
-/// Locks down %ProgramData%\NetUse. NetUse always runs elevated, but by default any standard user can
-/// create that folder (or files in it) first. That would let them feed data to the elevated process or
-/// plant links that redirect its writes, so the folder is made Administrators/SYSTEM-only.
+/// Windows folders resolved without the environment. NetUse runs elevated, but its environment comes from the
+/// signed-in user, and any program running as that user can redefine variables such as SystemDrive in
+/// HKCU\Environment. Windows builds the ProgramData known folder from %SystemDrive%, so that path (and with it
+/// NetUse's data folder) could be moved into a folder the other program controls.
+/// </summary>
+public static class TrustedPaths
+{
+    /// <summary>"C:\WINDOWS\system32", from GetSystemDirectory (kernel data, not an environment variable).</summary>
+    public static string System32 => Environment.SystemDirectory;
+
+    /// <summary>"C:\WINDOWS".</summary>
+    public static string Windows => Path.GetDirectoryName(Environment.SystemDirectory.TrimEnd('\\'))!;
+
+    /// <summary>"C:".</summary>
+    public static string SystemDrive => Path.GetPathRoot(Environment.SystemDirectory)!.TrimEnd('\\');
+
+    private static string? _programData;
+
+    /// <summary>
+    /// %ProgramData% from the machine's profile list (HKLM, admin-only) with %SystemDrive% filled in from the system
+    /// directory. Falls back to "C:\ProgramData".
+    /// </summary>
+    public static string ProgramData => _programData ??= ResolveProgramData();
+
+    private static string ResolveProgramData()
+    {
+        string fallback = SystemDrive + @"\ProgramData";
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+            if (k?.GetValue("ProgramData", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is string raw && raw.Length > 0)
+            {
+                string p = Regex.Replace(raw.Trim(), "%SystemDrive%", SystemDrive, RegexOptions.IgnoreCase);
+                if (p.IndexOf('%') < 0 && SafePath.IsLocalFile(p)) return Path.GetFullPath(p).TrimEnd('\\');
+            }
+        }
+        catch { }
+        return fallback;
+    }
+}
+
+/// <summary>
+/// Locks down NetUse's data folder (%ProgramData%\NetUse). NetUse always runs elevated, but by default any user can
+/// create that folder (or files in it) first. That would let them feed data to the elevated process or plant links
+/// that redirect its writes, so the folder is made Administrators/SYSTEM-only.
+///
+/// Only Administrators and SYSTEM count as trusted owners. Your own account doesn't: a program running as you
+/// without admin rights creates files with that same owner. The folder is checked and fixed through one open
+/// handle that is kept for the life of the process, so it can't be renamed or swapped for a link between checks.
 /// </summary>
 public static class SecureStore
 {
     private static readonly SecurityIdentifier Admins = new(WellKnownSidType.BuiltinAdministratorsSid, null);
     private static readonly SecurityIdentifier SystemSid = new(WellKnownSidType.LocalSystemSid, null);
+    private static readonly SecurityIdentifier TrustedInstaller = new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
+
+    /// <summary>Open handle to the data folder, held while NetUse runs: no one can rename or replace the folder meanwhile.</summary>
+    private static SafeFileHandle? _pin;
 
     /// <summary>True once the data folder has been verified/secured in this process.</summary>
     public static bool Ready { get; private set; }
 
     public static void EnsureDirectory(string dir)
     {
-        var di = new DirectoryInfo(dir);
+        dir = Path.GetFullPath(dir).TrimEnd('\\');
+        var parent = Directory.GetParent(dir) ?? throw new UnauthorizedAccessException($"{dir} has no parent folder.");
 
-        // A junction/symlink in place of our folder would redirect every elevated write.
-        if (di.Exists && di.Attributes.HasFlag(FileAttributes.ReparsePoint))
+        // Every folder above ours must be admin-only too. Otherwise a standard user could rename our folder away and
+        // put a link or a folder they control in its place.
+        if (!AdminOnly.Folders(parent, out var why))
+            throw new UnauthorizedAccessException($"NetUse won't keep its data in {dir} because {why}.");
+
+        for (int attempt = 1; ; attempt++)
         {
-            Directory.Delete(dir); // removes the link itself, never the target
-            di.Refresh();
-        }
+            if (attempt > 5) throw new UnauthorizedAccessException($"The NetUse data folder {dir} keeps being replaced by another program.");
 
-        if (di.Exists && !IsTrusted(GetOwner(di)))
-        {
-            // Pre-created by someone else: don't trust anything in it, move it aside.
-            Directory.Move(dir, dir + ".untrusted-" + DateTime.Now.ToString("yyyyMMddHHmmss"));
-            di.Refresh();
-        }
-
-        if (!di.Exists)
-        {
-            BuildSecurity().CreateDirectory(dir);
-            di.Refresh();
-        }
-
-        // Verify again AFTER creating: CreateDirectory silently does nothing if someone re-created the
-        // folder (or a link) in the moment between the checks above and the create. So the checks and the
-        // clean-up below always run, whether the folder is new or old.
-        if (!di.Exists || di.Attributes.HasFlag(FileAttributes.ReparsePoint) || !IsTrusted(GetOwner(di)))
-            throw new UnauthorizedAccessException($"The NetUse data folder {dir} was tampered with while it was being created.");
-
-        di.SetAccessControl(BuildSecurity()); // admin-only again, even if someone loosened it
-        foreach (var e in di.GetFileSystemInfos())
-        {
-            if (e.Attributes.HasFlag(FileAttributes.ReparsePoint) || !IsTrusted(GetOwner(e)))
+            var h = FsNative.OpenFolder(dir, out int err);
+            if (h == null)
             {
-                // planted file / link / hard link to a foreign file / sub-folder
-                if (e is DirectoryInfo sub) { if (sub.Attributes.HasFlag(FileAttributes.ReparsePoint)) sub.Delete(); else sub.Delete(true); }
-                else e.Delete();
+                if (err is FsNative.ERROR_FILE_NOT_FOUND or FsNative.ERROR_PATH_NOT_FOUND)
+                {
+                    // Created with the admin-only permissions already in place: never open to anyone, not even briefly.
+                    // If someone else creates the name first, the loop opens and checks theirs (and moves it aside).
+                    if (!FsNative.CreateFolder(dir, BuildSecurity(), out err) && err != FsNative.ERROR_ALREADY_EXISTS)
+                        throw new Win32Exception(err, $"Could not create {dir}");
+                }
+                else if (err == FsNative.ERROR_ACCESS_DENIED) SetAside(dir); // a folder that shuts administrators out isn't ours
+                else if (err == FsNative.ERROR_SHARING_VIOLATION) System.Threading.Thread.Sleep(200); // e.g. a backup tool has it open
+                else throw new Win32Exception(err, $"Could not open {dir}");
                 continue;
             }
-            if (e is FileInfo f)
+
+            var (isLink, isDir, sec) = FsNative.Inspect(h);
+            var owner = sec?.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            if (isLink || !isDir || sec == null || owner == null || !(owner.Equals(Admins) || owner.Equals(SystemSid)))
             {
-                // drop any explicit ACEs so the file only carries the folder's (admin-only) permissions
-                var fs = new FileSecurity();
-                fs.SetAccessRuleProtection(false, false);
-                f.SetAccessControl(fs);
+                // A link, a file, or a folder created by another account: never use it, move it aside.
+                h.Dispose();
+                SetAside(dir);
+                continue;
+            }
+
+            bool wasLocked = AdminOnly.Locked(sec);
+            // Lock the folder itself first (through the handle that was just checked, without touching anything
+            // inside), so nothing new can appear in it while it's being cleaned.
+            FsNative.SetSecurity(h, BuildSecurity());
+            Sweep(dir, wasLocked);
+            _pin = h;
+            Ready = true;
+            return;
+        }
+    }
+
+    /// <summary>Removes links and anything not created by an administrator; leaves NetUse's own files admin-owned.</summary>
+    private static void Sweep(string dir, bool wasLocked)
+    {
+        using var me = WindowsIdentity.GetCurrent();
+        foreach (var e in new DirectoryInfo(dir).GetFileSystemInfos())
+        {
+            try
+            {
+                var owner = GetOwner(e);
+                bool trusted = owner != null && (owner.Equals(Admins) || owner.Equals(SystemSid) || owner.Equals(TrustedInstaller)
+                    // With "owner = object creator" in effect, NetUse's own files carry your account as owner. That only
+                    // proves anything while the folder was already closed to everyone but administrators.
+                    || (wasLocked && me.User != null && owner.Equals(me.User)));
+                bool link = e.Attributes.HasFlag(FileAttributes.ReparsePoint) || (e is FileInfo && FsNative.LinkCount(e.FullName) > 1);
+                if (link || !trusted)
+                {
+                    // Deleting a link (or one name of a hard-linked file) never touches the target.
+                    if (e is DirectoryInfo sub) { if (link) sub.Delete(); else sub.Delete(true); }
+                    else e.Delete();
+                    continue;
+                }
+                if (e is FileInfo f)
+                {
+                    // owned by Administrators, permissions only from the (admin-only) folder
+                    var fs = new FileSecurity();
+                    fs.SetOwner(Admins);
+                    fs.SetAccessRuleProtection(false, false);
+                    f.SetAccessControl(fs);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new UnauthorizedAccessException($"{e.FullName} was put in the NetUse data folder by another account and couldn't be removed: {ex.Message}", ex);
             }
         }
-        Ready = true;
+    }
+
+    /// <summary>Renames whatever holds the data folder's name, so a fresh folder can be created in its place.</summary>
+    private static void SetAside(string dir)
+    {
+        string aside = $"{dir}.untrusted-{DateTime.Now:yyyyMMddHHmmss}-{Random.Shared.Next(0x10000):x4}";
+        if (!FsNative.Move(dir, aside, out int err) && err is not (FsNative.ERROR_FILE_NOT_FOUND or FsNative.ERROR_PATH_NOT_FOUND))
+            throw new UnauthorizedAccessException($"{dir} was created by another account and couldn't be moved aside (error {err}).");
     }
 
     private static DirectorySecurity BuildSecurity()
@@ -91,13 +190,122 @@ public static class SecureStore
         }
         catch { return null; }
     }
+}
 
-    private static bool IsTrusted(SecurityIdentifier? sid)
+/// <summary>Handle-based file system calls for <see cref="SecureStore"/> (never follow links).</summary>
+internal static class FsNative
+{
+    public const int ERROR_FILE_NOT_FOUND = 2, ERROR_PATH_NOT_FOUND = 3, ERROR_ACCESS_DENIED = 5,
+        ERROR_SHARING_VIOLATION = 32, ERROR_ALREADY_EXISTS = 183;
+
+    private const uint READ_CONTROL = 0x00020000, WRITE_DAC = 0x00040000, WRITE_OWNER = 0x00080000,
+        FILE_READ_ATTRIBUTES = 0x80, SYNCHRONIZE = 0x00100000;
+    private const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2, FILE_SHARE_DELETE = 4, OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10, FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+    private const int SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION = 1, DACL_SECURITY_INFORMATION = 4;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateDirectoryW(string path, ref SECURITY_ATTRIBUTES sa);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool MoveFileExW(string from, string to, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint GetSecurityInfo(SafeHandle h, int type, int info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr sd);
+
+    [DllImport("advapi32.dll")] private static extern int GetSecurityDescriptorLength(IntPtr sd);
+    [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr p);
+
+    // Sets exactly this object's security: unlike SetSecurityInfo it never walks into the folder's contents.
+    [DllImport("ntdll.dll")] private static extern int NtSetSecurityObject(SafeHandle h, int info, byte[] sd);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BY_HANDLE_FILE_INFORMATION
     {
-        if (sid == null) return false;
-        if (sid.Equals(Admins) || sid.Equals(SystemSid)) return true;
-        using var me = WindowsIdentity.GetCurrent();
-        return me.User is { } user && sid.Equals(user); // elevated admin when "owner = creator" policy is in effect
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
+        public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+    }
+
+    /// <summary>
+    /// Opens whatever sits at the path without following a link. No delete sharing: while the handle is open, nobody
+    /// (administrators included) can rename or delete the folder.
+    /// </summary>
+    public static SafeFileHandle? OpenFolder(string path, out int error)
+    {
+        var h = CreateFileW(path, READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+        error = h.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+        if (!h.IsInvalid) return h;
+        h.Dispose();
+        return null;
+    }
+
+    public static bool CreateFolder(string path, DirectorySecurity security, out int error)
+    {
+        byte[] sd = security.GetSecurityDescriptorBinaryForm();
+        var pin = GCHandle.Alloc(sd, GCHandleType.Pinned);
+        try
+        {
+            var sa = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(), lpSecurityDescriptor = pin.AddrOfPinnedObject() };
+            bool ok = CreateDirectoryW(path, ref sa);
+            error = ok ? 0 : Marshal.GetLastWin32Error();
+            return ok;
+        }
+        finally { pin.Free(); }
+    }
+
+    /// <summary>(is a link, is a folder, owner + permissions) of an open handle.</summary>
+    public static (bool isLink, bool isDir, DirectorySecurity? sec) Inspect(SafeFileHandle h)
+    {
+        if (!GetFileInformationByHandle(h, out var info)) return (true, false, null);
+        bool link = (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        bool dir = (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out IntPtr sd) != 0)
+            return (link, dir, null);
+        try
+        {
+            var bytes = new byte[GetSecurityDescriptorLength(sd)];
+            Marshal.Copy(sd, bytes, 0, bytes.Length);
+            var sec = new DirectorySecurity();
+            sec.SetSecurityDescriptorBinaryForm(bytes, AccessControlSections.Owner | AccessControlSections.Access);
+            return (link, dir, sec);
+        }
+        finally { LocalFree(sd); }
+    }
+
+    /// <summary>Owner + protected DACL of exactly this object (children are left alone).</summary>
+    public static void SetSecurity(SafeFileHandle h, DirectorySecurity security)
+    {
+        int status = NtSetSecurityObject(h, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, security.GetSecurityDescriptorBinaryForm());
+        if (status != 0) throw new Win32Exception($"Could not secure the NetUse data folder (NTSTATUS 0x{status:X8}).");
+    }
+
+    /// <summary>Renames a file or folder (a link is renamed itself, not its target).</summary>
+    public static bool Move(string from, string to, out int error)
+    {
+        bool ok = MoveFileExW(from, to, 0);
+        error = ok ? 0 : Marshal.GetLastWin32Error();
+        return ok;
+    }
+
+    /// <summary>Number of names (hard links) the file has; NetUse never creates more than one.</summary>
+    public static uint LinkCount(string path)
+    {
+        using var h = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+        return !h.IsInvalid && GetFileInformationByHandle(h, out var info) ? info.NumberOfLinks : 1;
     }
 }
 
@@ -120,7 +328,7 @@ public static class AdminOnly
     private const FileSystemRights GenericAll = (FileSystemRights)0x10000000, GenericWrite = (FileSystemRights)0x40000000;
     private const FileSystemRights Takeover = FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership | GenericAll;
     private const FileSystemRights FileWrite = FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.Delete | Takeover | GenericWrite;
-    // the program's own folder: adding a file there plants a DLL next to the exe
+    // the program's (or data) folder itself: adding a file there plants a DLL next to the exe
     private const FileSystemRights DirWrite = FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.DeleteSubdirectoriesAndFiles
                                               | FileSystemRights.Delete | Takeover | GenericWrite;
     // folders above it: only renaming/replacing the folder chain matters
@@ -137,11 +345,32 @@ public static class AdminOnly
             if (!fi.Exists) { reason = "missing"; return false; }
             if (fi.Attributes.HasFlag(FileAttributes.ReparsePoint)) { reason = $"{fi.FullName} is a link"; return false; }
             if (!Check(fi.GetAccessControl(), FileWrite, fi.FullName, out reason)) return false;
-            var dir = fi.Directory;
-            bool own = true;
+            return Chain(fi.Directory, own: true, out reason);
+        }
+        catch (Exception ex) { reason = ex.Message; return false; }
+    }
+
+    /// <summary>
+    /// True when no one but administrators can add to, rename, delete or take over this folder, and no one but
+    /// administrators can rename or replace any folder above it.
+    /// </summary>
+    public static bool Folder(DirectoryInfo dir, out string reason) => Chain(dir, own: true, out reason);
+
+    /// <summary>True when no one but administrators can rename, delete or take over this folder or any folder above it.</summary>
+    public static bool Folders(DirectoryInfo dir, out string reason) => Chain(dir, own: false, out reason);
+
+    /// <summary>The permissions (owner and allow rules) leave only administrators able to change the folder.</summary>
+    public static bool Locked(FileSystemSecurity sec) => Check(sec, DirWrite, "", out _);
+
+    private static bool Chain(DirectoryInfo? dir, bool own, out string reason)
+    {
+        reason = "";
+        try
+        {
             while (dir != null)
             {
-                if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint) && dir.Parent != null) { reason = $"{dir.FullName} is a link"; return false; }
+                if (dir.Exists && dir.Attributes.HasFlag(FileAttributes.ReparsePoint) && dir.Parent != null) { reason = $"{dir.FullName} is a link"; return false; }
+                if (!dir.Exists) { reason = $"{dir.FullName} is missing"; return false; }
                 if (!Check(dir.GetAccessControl(), own ? DirWrite : AncestorWrite, dir.FullName, out reason)) return false;
                 own = false;
                 dir = dir.Parent;
@@ -238,7 +467,7 @@ public static class InstanceLock
     }
 
     /// <summary>Another elevated process with our exe name (an unelevated look-alike doesn't count).</summary>
-    public static bool OtherElevatedInstance()
+    public static bool OtherElevatedInstance(int? session = null)
     {
         using var me = System.Diagnostics.Process.GetCurrentProcess();
         foreach (var p in System.Diagnostics.Process.GetProcessesByName(me.ProcessName))
@@ -248,6 +477,7 @@ public static class InstanceLock
                 if (p.Id == me.Id) continue;
                 try
                 {
+                    if (session != null && p.SessionId != session) continue;
                     if (!OpenProcessToken(p.Handle, 0x0008 /* TOKEN_QUERY */, out var tok)) continue;
                     try { if (GetTokenInformation(tok, 20 /* TokenElevation */, out int elevated, 4, out _) && elevated != 0) return true; }
                     finally { CloseHandle(tok); }

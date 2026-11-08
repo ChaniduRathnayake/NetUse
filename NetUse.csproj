@@ -1,7 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- .NET 10 LTS (supported to Nov 2028). .NET 8 support ended 10 Nov 2026: the runtime is bundled, so only
+         rebuilding NetUse patches it. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Program.Main: "Start with Windows" runs NetUse as SYSTEM to launch it in your session, without loading WPF -->
+    <StartupObject>NetUse.Program</StartupObject>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
@@ -15,13 +19,17 @@
     <Company>NetUse</Company>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- WFAC010 is a WinForms analyzer; this is a WPF app (WinForms is only used for the tray icon), which reads DPI awareness from app.manifest -->
-    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <NoWarn>$(NoWarn);WFAC010;WFO0003</NoWarn>
     <Copyright>Copyright © 2026 NetUse</Copyright>
     <!-- runs elevated: don't let DOTNET_STARTUP_HOOKS from the user's environment load code into it -->
     <StartupHookSupport>false</StartupHookSupport>
+    <!-- a package with a known moderate/high/critical vulnerability (direct or transitive) fails the build -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsAsErrors>$(WarningsAsErrors);NU1902;NU1903;NU1904</WarningsAsErrors>
   </PropertyGroup>
 
-  <!-- `dotnet publish -c Release` => one self-contained NetUse.exe (no .NET install, no other files) -->
+  <!-- `dotnet publish -c Release` => a self-contained NetUse.exe (no .NET install needed) plus its native DLLs -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -50,7 +58,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.16" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <!-- the SQLite library itself: 2.1.12+ has the fix for CVE-2025-6965 (memory corruption, GHSA-2m69-gcr7-jv3q) -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.14" />
   </ItemGroup>
 
   <!-- TraceEvent copies helpers for ETL merging and PDB symbols (amd64\KernelTraceControl.dll, msdia140.dll,

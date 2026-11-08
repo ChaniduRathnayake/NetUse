@@ -12,6 +12,7 @@ installer/
 /*.dll
 setup/Windows/*.exe
 setup/Windows/*.zip
+setup/Windows/*.txt
 setup/Android/*.apk
 setup/MacOS/*.ipa
 setup/MacOS/*.dmg

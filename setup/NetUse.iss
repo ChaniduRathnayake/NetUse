@@ -43,8 +43,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 
-; NetUse holds this mutex while running: Setup and the uninstaller ask the user to close it first
-AppMutex=Global\NetUseSingleInstanceMutex
+; No AppMutex: any program, even one without admin rights, can create a mutex with that name and so block every install,
+; update and uninstall. Setup finds a running NetUse through the files it uses (Restart Manager) and the uninstaller
+; looks for the real NetUse.exe process (see InitializeUninstall).
 CloseApplications=yes
 
 SetupIconFile=..\app.ico
@@ -80,11 +81,88 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN NetUse /F"; Flags: runhidden; RunOnceId: "DelStartupTask"
 
 [Code]
+const
+  FILE_ATTRIBUTE_REPARSE_POINT = $400;
+  INVALID_FILE_ATTRIBUTES = $FFFFFFFF;
+
+function GetFileAttributes(lpFileName: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+
+// True while a NetUse.exe started from Dir is running (checked on the real process, not on a mutex name).
+function NetUseRunningFrom(const Dir: String): Boolean;
+var
+  Locator, Service, Procs, P: Variant;
+  I, N: Integer;
+  ExePath: String;
+begin
+  Result := False;
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    Procs := Service.ExecQuery('SELECT ExecutablePath FROM Win32_Process WHERE Name = ''NetUse.exe''');
+    N := Procs.Count;
+    for I := 0 to N - 1 do
+    begin
+      P := Procs.ItemIndex(I);
+      try
+        ExePath := P.ExecutablePath;
+      except
+        ExePath := '';
+      end;
+      if (ExePath <> '') and (CompareText(RemoveBackslashUnlessRoot(ExtractFileDir(ExePath)), RemoveBackslashUnlessRoot(Dir)) = 0) then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  while NetUseRunningFrom(ExpandConstant('{app}')) do
+    if SuppressibleMsgBox('NetUse is running. Right-click the NetUse icon in the taskbar notification area, choose Exit, then click OK.',
+        mbInformation, MB_OKCANCEL, IDCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+end;
+
+// %ProgramData%\NetUse without trusting the environment: a program running without admin rights can redefine
+// SystemDrive for your account, which would otherwise point the (elevated) uninstaller at a folder it controls.
+function DataDir(): String;
+var
+  Drive, S: String;
+begin
+  Drive := ExtractFileDrive(ExpandConstant('{sys}')); // from GetSystemDirectory, not from an environment variable
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList', 'ProgramData', S)
+     and (CompareText(Copy(S, 1, 13), '%SystemDrive%') = 0) then
+    S := Drive + Copy(S, 14, Length(S))
+  else
+    S := Drive + '\ProgramData';
+  if Pos('%', S) > 0 then
+    S := Drive + '\ProgramData';
+  Result := AddBackslash(S) + 'NetUse';
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Dir: String;
+  Attr: Cardinal;
 begin
   // Usage history lives in %ProgramData%\NetUse. Keep it unless the user asks to remove it.
-  if (CurUninstallStep = usPostUninstall) and DirExists(ExpandConstant('{commonappdata}\NetUse')) then
-    if SuppressibleMsgBox('Also delete your NetUse usage history and settings (' +
-        ExpandConstant('{commonappdata}\NetUse') + ')?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
-      DelTree(ExpandConstant('{commonappdata}\NetUse'), True, True, True);
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  Dir := DataDir();
+  Attr := GetFileAttributes(Dir);
+  // missing, or a link someone put in its place: never follow it
+  if (Attr = INVALID_FILE_ATTRIBUTES) or ((Attr and FILE_ATTRIBUTE_REPARSE_POINT) <> 0) then
+    Exit;
+  if SuppressibleMsgBox('Also delete your NetUse usage history and settings (' + Dir + ')?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
+    DelTree(Dir, True, True, True);
 end;

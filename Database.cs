@@ -16,18 +16,30 @@ namespace NetUse;
 /// </summary>
 public class Database
 {
-    public static string Dir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NetUse");
+    /// <summary>%ProgramData%\NetUse, resolved without the (user-controllable) environment: see <see cref="TrustedPaths"/>.</summary>
+    public static string Dir => Path.Combine(TrustedPaths.ProgramData, "NetUse");
 
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private readonly string _cs;
     private readonly object _lock = new();
     private readonly Dictionary<string, string> _cache = new();
 
-    public Database()
+    private static readonly string[] Tables =
+        { "usage", "daily", "flows", "hosts", "devices", "wifi", "apps", "alerts", "blocked", "settings", "app_paths" };
+
+    /// <summary>Set when the database was set aside at startup (for an alert).</summary>
+    public string? TamperNote { get; }
+    /// <summary>The set-aside database held things NetUse never creates (not just damage).</summary>
+    public bool TamperSuspicious { get; private set; }
+
+    public Database() : this(Dir) { }
+
+    public Database(string dir)
     {
-        SecureStore.EnsureDirectory(Dir);
-        _cs = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Dir, "netuse.db"), Pooling = true }.ToString();
+        SecureStore.EnsureDirectory(dir);
+        string file = Path.Combine(dir, "netuse.db");
+        _cs = new SqliteConnectionStringBuilder { DataSource = file, Pooling = true }.ToString();
+        TamperNote = CheckSchema(file);
         Exec("PRAGMA journal_mode=WAL;");
         Exec(@"CREATE TABLE IF NOT EXISTS usage(ts INTEGER NOT NULL, app TEXT NOT NULL, sent INTEGER NOT NULL, recv INTEGER NOT NULL, PRIMARY KEY(ts, app));
                CREATE INDEX IF NOT EXISTS ix_usage_app ON usage(app);
@@ -62,10 +74,64 @@ public class Database
             // one-time: the program locations known so far are the baseline for "new location" alerts
             Exec("INSERT OR IGNORE INTO app_paths(path, name, first_seen) SELECT path, name, first_seen FROM apps WHERE COALESCE(path,'')<>'';");
         }
+        if (ver < 4)
+        {
+            // one-time: host names are now only kept when they resolve back to the address; forget the unchecked ones
+            Exec("DELETE FROM hosts;");
+        }
         Exec($"PRAGMA user_version={SchemaVersion};");
     }
 
-    private SqliteConnection Open() { var c = new SqliteConnection(_cs); c.Open(); return c; }
+    private SqliteConnection Open()
+    {
+        var c = new SqliteConnection(_cs);
+        c.Open();
+        Harden(c);
+        return c;
+    }
+
+    /// <summary>
+    /// Settings for every connection, so that an edited or planted database can't do more than plain data could:
+    /// no functions with side effects inside views, triggers or indexes (trusted_schema), and none of SQLite's
+    /// risky maintenance switches such as a writable schema (DEFENSIVE).
+    /// </summary>
+    private static void Harden(SqliteConnection c)
+    {
+        SQLitePCL.raw.sqlite3_db_config(c.Handle, 1010 /* SQLITE_DBCONFIG_DEFENSIVE */, 1, out _);
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "PRAGMA trusted_schema=OFF;";
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// NetUse's database only ever contains its own tables and indexes. A view or trigger, or a non-table under one of
+    /// its table names, means someone edited the file to run their SQL inside NetUse: it is set aside, unread, and a
+    /// fresh database is started. Returns a note for an alert, or null.
+    /// </summary>
+    private string? CheckSchema(string file)
+    {
+        if (!File.Exists(file)) return null;
+        List<string> odd;
+        string? unreadable = null;
+        try
+        {
+            string tables = string.Join(",", Tables.Select(t => $"'{t}'"));
+            odd = Query($"SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('view','trigger') OR (name IN ({tables}) AND type <> 'table')",
+                r => r.GetString(0));
+        }
+        catch (SqliteException ex) { odd = new List<string>(); unreadable = ex.Message; }
+        if (odd.Count == 0 && unreadable == null) return null;
+
+        SqliteConnection.ClearAllPools(); // release the file before moving it
+        string aside = $"{file}.{(unreadable != null ? "unreadable" : "tampered")}-{DateTime.Now:yyyyMMddHHmmss}";
+        foreach (var ext in new[] { "", "-wal", "-shm" })
+            if (File.Exists(file + ext)) File.Move(file + ext, aside + ext);
+        string kept = $"It was set aside as {Path.GetFileName(aside)} and a new, empty history was started.";
+        TamperSuspicious = unreadable == null;
+        return unreadable != null
+            ? $"The NetUse database couldn't be read ({unreadable}). {kept}"
+            : $"The NetUse database contained things NetUse never creates ({string.Join(", ", odd.Take(5))}), which could run someone else's commands inside NetUse. {kept}";
+    }
 
     private void Exec(string sql, params (string k, object? v)[] ps)
     {
