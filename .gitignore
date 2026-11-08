@@ -1,0 +1,26 @@
+# build output
+bin/
+obj/
+publish/
+installer/
+*.user
+.vs/
+.vscode/
+
+# installers are published as GitHub Release assets, not committed
+/NetUse.exe
+setup/Windows/*.exe
+setup/Windows/*.zip
+setup/Android/*.apk
+setup/MacOS/*.ipa
+setup/MacOS/*.dmg
+
+# local data / logs
+*.db
+*.db-wal
+*.db-shm
+error.log*
+
+# signing material
+*.pfx
+*.p12

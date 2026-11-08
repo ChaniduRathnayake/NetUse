@@ -1,0 +1,49 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>NetUse</AssemblyName>
+    <RootNamespace>NetUse</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <Version>1.3.1</Version>
+    <Product>NetUse</Product>
+    <Company>NetUse</Company>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WFAC010 is a WinForms analyzer; this is a WPF app (WinForms is only used for the tray icon), which reads DPI awareness from app.manifest -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <Copyright>Copyright © 2026 NetUse</Copyright>
+    <!-- runs elevated: don't let DOTNET_STARTUP_HOOKS from the user's environment load code into it -->
+    <StartupHookSupport>false</StartupHookSupport>
+  </PropertyGroup>
+
+  <!-- `dotnet publish -c Release` => one self-contained NetUse.exe (no .NET install, no other files) -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <DebugType>embedded</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.16" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+  </ItemGroup>
+
+  <!-- TraceEvent copies helpers for ETL merging and PDB symbols (amd64\KernelTraceControl.dll, msdia140.dll,
+       TraceReloggerLib.dll, Dia2Lib.dll). A live kernel session on Windows 10/11 doesn't use them, so they're
+       left out instead of sitting loose next to the exe. -->
+  <Target Name="DropTraceEventExtras" BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <None Remove="@(None)" Condition="$([System.String]::Copy('%(None.FullPath)').ToLowerInvariant().Contains('microsoft.diagnostics.tracing.traceevent'))" />
+    </ItemGroup>
+  </Target>
+</Project>
