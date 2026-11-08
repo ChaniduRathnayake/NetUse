@@ -115,10 +115,7 @@
         </Grid.ColumnDefinitions>
 
         <StackPanel Orientation="Horizontal" Margin="18,0,12,0" VerticalAlignment="Center">
-          <Border Width="30" Height="30" CornerRadius="9" Background="{DynamicResource Primary}">
-            <Path Data="M3,15 C6,15 7,6 10,6 C13,6 13,12 16,12 C18,12 19,9 21,9" Stroke="{DynamicResource OnAccent}" StrokeThickness="2.2"
-                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="24" Height="20" Stretch="None" Margin="3,4,0,0"/>
-          </Border>
+          <Image Source="/app.png" Width="30" Height="30" RenderOptions.BitmapScalingMode="HighQuality"/>
           <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="NetUse" FontSize="15" FontWeight="SemiBold"/>
             <StackPanel Orientation="Horizontal" Margin="0,1,0,0">
