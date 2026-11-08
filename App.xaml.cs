@@ -9,20 +9,30 @@ namespace NetUse;
 
 public partial class App : Application
 {
-    // Global\ so a second copy in another session can't start (it would also stop our ETW session),
-    // and a standard user can't pre-create it to keep NetUse from starting.
+    // Global\ so a second copy in another session can't start (it would also stop our ETW session).
+    // Any program can pre-create a Global\ mutex, so an existing one only counts when Administrators own
+    // it (see InstanceLock); a squatted name can't keep NetUse from starting.
     public const string MutexName = @"Global\NetUseSingleInstanceMutex";
     private static Mutex? _mutex;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        _mutex = new Mutex(true, MutexName, out bool created);
+        bool created;
+        try { _mutex = new Mutex(true, MutexName, out created); }
+        catch (UnauthorizedAccessException) { _mutex = null; created = false; } // squatter denied us access
         if (!created)
         {
-            MessageBox.Show("NetUse is already running. Look for it in the system tray.", "NetUse");
-            Shutdown();
-            return;
+            bool real = (_mutex != null && InstanceLock.OwnedByAdmins(_mutex)) || InstanceLock.OtherElevatedInstance();
+            if (real)
+            {
+                MessageBox.Show("NetUse is already running. Look for it in the system tray.", "NetUse");
+                Shutdown();
+                return;
+            }
+            _mutex?.Dispose();
+            _mutex = null;
+            Log(new InvalidOperationException("The NetUse start-up lock was created by a non-administrator program. It was ignored."));
         }
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
         DispatcherUnhandledException += (_, args) => { Log(args.Exception); args.Handled = true; };
@@ -30,6 +40,7 @@ public partial class App : Application
 
         try
         {
+            GeoIp.Preload();            // country table loads in the background while the window builds
             var w = new MainWindow();   // MainWindow loads the saved theme (Light / Dark / Dark Blue) itself
             MainWindow = w;
             if (!e.Args.Contains("--minimized")) w.Show();

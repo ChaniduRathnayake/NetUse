@@ -10,7 +10,7 @@
     <RootNamespace>NetUse</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.3.1</Version>
+    <Version>1.4.0</Version>
     <Product>NetUse</Product>
     <Company>NetUse</Company>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
@@ -26,7 +26,11 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- SECURITY: native DLLs are NOT self-extracted. Self-extraction unpacks them to %TEMP%\.net, which the
+         non-elevated user (and any program they run) can write to, and the elevated NetUse would then load a
+         swapped DLL as administrator - silently at every logon via "Start with Windows". The six native DLLs
+         ship next to NetUse.exe instead (Program Files for the installer, the same folder for portable). -->
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <PublishReadyToRun>true</PublishReadyToRun>
     <DebugType>embedded</DebugType>
@@ -34,8 +38,14 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- app icon (128px frame of app.ico) shown as the logo in the title bar -->
+    <!-- app icon (128px frame of app.ico) shown as the logo in the title bar and About -->
     <Resource Include="app.png" />
+    <!-- country flags for destinations (public domain, flagcdn.com) -->
+    <Resource Include="Resources\Flags\*.png" />
+    <!-- offline IP-to-country table (CC0, sapics/ip-location-db); rebuild with tools\make-geoip.py -->
+    <EmbeddedResource Include="Resources\geoip.bin" LogicalName="NetUse.geoip.bin" />
+    <!-- build date shown in About -->
+    <AssemblyMetadata Include="BuildDate" Value="$([System.DateTime]::Now.ToString('yyyy-MM-dd HH:mm'))" />
   </ItemGroup>
 
   <ItemGroup>

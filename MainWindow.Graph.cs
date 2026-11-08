@@ -280,7 +280,7 @@ public partial class MainWindow
         bool live = ev.App.Length > 0 && _mon.Apps.TryGetValue(ev.App, out var s) && s.UpSpeed + s.DownSpeed > 0;
         string status = ev.Type == "Blocked" ? "Blocked" : ev.App.Length == 0 ? "—" : live ? "Active now" : "Idle";
         string fw = ev.App.Length == 0 ? "—" : blocked.Contains(ev.App) ? "Blocked (rule active)" : "Allowed";
-        string unit = ev.Type == "Spike" ? "/s" : "";
+        string unit = ev.Type is "Spike" or "Speed" ? "/s" : "";
 
         DetFields.Children.Clear();
         TextBlock Row(string label, string value, string key = "TextPrimary")
@@ -300,6 +300,8 @@ public partial class MainWindow
         if (meta != null) Row("Program", ev.Path.Length > 0 ? ev.Path : meta.Exe, "TextSecondary");
         Row("Destination", ev.Remote.Length > 0 ? ev.Remote : "—");
         var domain = Row("Host name", ip.Length == 0 ? "—" : HostNames.Enabled ? "Looking up…" : "Lookups are off");
+        string cc = ip.Length > 0 ? GeoIp.Country(ip) : "";
+        Row("Country", cc.Length > 0 ? GeoIp.Name(cc) : ip.Length > 0 && Net.IsLan(ip) ? "Local network" : "—");
         Row("Protocol", ev.Proto.Length > 0 ? ev.Proto : "—");
         Row("Incoming", ev.Recv > 0 ? Fmt.Bytes(ev.Recv) + unit : "—", "Incoming");
         Row("Outgoing", ev.Sent > 0 ? Fmt.Bytes(ev.Sent) + unit : "—", "Outgoing");

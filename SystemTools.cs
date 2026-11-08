@@ -31,10 +31,13 @@ public static class Sys
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
-        var err = p.StandardError.ReadToEndAsync(); // read both pipes concurrently (avoids pipe-buffer deadlock)
-        string o = p.StandardOutput.ReadToEnd();
-        if (!p.WaitForExit(30000)) { try { p.Kill(); } catch { } return (-1, "Timed out"); }
-        return (p.ExitCode, o + err.Result);
+        // read both pipes asynchronously (no pipe-buffer deadlock) and wait with a timeout. The old code read
+        // stdout synchronously first, so a hung tool blocked forever and the 30 s timeout never applied.
+        var outTask = p.StandardOutput.ReadToEndAsync();
+        var errTask = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(30000)) { try { p.Kill(true); } catch { } return (-1, "Timed out"); }
+        p.WaitForExit(); // flush the redirected streams
+        return (p.ExitCode, outTask.Result + errTask.Result);
     }
 }
 
@@ -143,7 +146,7 @@ public static class StartupTask
     {
         error = "";
         var exe = Environment.ProcessPath ?? "";
-        if (!IsInProtectedFolder(exe))
+        if (!IsAdminOnly(exe, out _))
         {
             if (!IsSingleFile)
             {
@@ -151,6 +154,12 @@ public static class StartupTask
                 return false;
             }
             if (!InstallCopy(exe, out exe, out error)) return false;
+        }
+        // the copy (or the installed folder) must really be admin-only: checked on its permissions, not its name
+        if (!IsAdminOnly(exe, out var why))
+        {
+            error = $"{Path.GetDirectoryName(exe)} can be changed without administrator rights ({why}), so NetUse won't run it elevated at sign-in.";
+            return false;
         }
         var (code, o) = Sys.Run("schtasks", "/Create", "/TN", "NetUse", "/TR", $"\"{exe}\" --minimized",
             "/SC", "ONLOGON", "/RL", "HIGHEST", "/F");
@@ -173,7 +182,30 @@ public static class StartupTask
     private static string CopyPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "NetUse", "NetUse.exe");
 
-    /// <summary>Copies the running single-file exe to Program Files (admin-only), replacing an older copy.</summary>
+    /// <summary>Native libraries that ship next to NetUse.exe (they are not self-extracted, see NetUse.csproj).</summary>
+    public static readonly string[] NativeLibs =
+        { "D3DCompiler_47_cor3.dll", "PenImc_cor3.dll", "PresentationNative_cor3.dll", "vcruntime140_cor3.dll", "wpfgfx_cor3.dll", "e_sqlite3.dll" };
+
+    private static bool IsOurs(string file)
+    {
+        string n = Path.GetFileName(file);
+        return n.StartsWith("NetUse.exe", StringComparison.OrdinalIgnoreCase) || NativeLibs.Contains(n, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The exe and every DLL it loads from its folder can only be changed by administrators.</summary>
+    private static bool IsAdminOnly(string exe, out string reason)
+    {
+        if (!AdminOnly.File(exe, out reason)) return false;
+        string dir = Path.GetDirectoryName(exe)!;
+        foreach (var lib in NativeLibs)
+        {
+            string p = Path.Combine(dir, lib);
+            if (File.Exists(p) && !AdminOnly.File(p, out reason)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Copies the running exe and its native DLLs to Program Files (admin-only), replacing an older copy.</summary>
     private static bool InstallCopy(string src, out string dst, out string error)
     {
         dst = CopyPath;
@@ -181,18 +213,24 @@ public static class StartupTask
         try
         {
             if (!SafePath.IsLocalFile(src)) { error = "NetUse can't start with Windows when it runs from a network location."; return false; }
-            string dir = Path.GetDirectoryName(dst)!;
-            // never overwrite part of a full (installer) installation with the single-file exe
-            if (Directory.Exists(dir) && Directory.EnumerateFileSystemEntries(dir)
-                    .Any(f => !Path.GetFileName(f).StartsWith("NetUse.exe", StringComparison.OrdinalIgnoreCase)))
+            string dir = Path.GetDirectoryName(dst)!, srcDir = Path.GetDirectoryName(src)!;
+            // never overwrite part of a full (installer) installation with a portable copy
+            if (Directory.Exists(dir) && Directory.EnumerateFileSystemEntries(dir).Any(f => !IsOurs(f)))
             {
                 error = "NetUse is already installed in Program Files. Turn this on from the installed copy.";
                 return false;
             }
             Directory.CreateDirectory(dir);
-            string tmp = dst + ".new";
-            File.Copy(src, tmp, true);
-            File.Move(tmp, dst, true);
+            foreach (var lib in NativeLibs)
+            {
+                string from = Path.Combine(srcDir, lib);
+                if (!File.Exists(from)) continue;
+                string to = Path.Combine(dir, lib);
+                File.Copy(from, to + ".new", true);
+                File.Move(to + ".new", to, true);
+            }
+            File.Copy(src, dst + ".new", true);
+            File.Move(dst + ".new", dst, true);
             return true;
         }
         catch (Exception ex)
@@ -210,23 +248,12 @@ public static class StartupTask
             string dst = CopyPath, dir = Path.GetDirectoryName(dst)!;
             if (!IsSingleFile || !File.Exists(dst)) return;
             if (string.Equals(Path.GetFullPath(Environment.ProcessPath ?? ""), dst, StringComparison.OrdinalIgnoreCase)) return;
-            if (Directory.EnumerateFileSystemEntries(dir).Count() != 1) return; // not a copy we made
-            File.Delete(dst);
+            var entries = Directory.EnumerateFileSystemEntries(dir).ToList();
+            if (entries.Any(f => !IsOurs(f))) return; // not a copy we made (e.g. the installer's folder)
+            foreach (var f in entries) File.Delete(f);
             Directory.Delete(dir);
         }
         catch { /* best effort: a leftover copy is harmless once the task is gone */ }
-    }
-
-    private static bool IsInProtectedFolder(string exe)
-    {
-        if (!SafePath.IsLocalFile(exe)) return false;
-        string full = Path.GetFullPath(exe);
-        foreach (var f in new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 })
-        {
-            string root = Environment.GetFolderPath(f);
-            if (root.Length > 0 && full.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return false;
     }
 }
 

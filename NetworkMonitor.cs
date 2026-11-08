@@ -48,6 +48,13 @@ public class NetworkMonitor : IDisposable
     public volatile bool Paused;
     public volatile string? Error;
     public event Action<AppStats>? AppSeen;
+    /// <summary>
+    /// First time in this session a program file is seen sending/receiving (name, full path). Apps are grouped
+    /// by process name, so without this a look-alike ("chrome.exe" running from %TEMP%) would hide under the
+    /// real app's name and never raise a "New app" alert.
+    /// </summary>
+    public event Action<string, string>? PathSeen;
+    private readonly ConcurrentDictionary<string, byte> _paths = new(StringComparer.OrdinalIgnoreCase);
 
     public void Start()
     {
@@ -163,7 +170,9 @@ public class NetworkMonitor : IDisposable
             using var p = Process.GetProcessById(pid);
             string path = "";
             try { path = p.MainModule?.FileName ?? ""; } catch { }
-            return _pids[pid] = (p.ProcessName, path);
+            var v2 = _pids[pid] = (p.ProcessName, path);
+            if (path.Length > 0 && _paths.TryAdd(path, 0)) PathSeen?.Invoke(p.ProcessName, path);
+            return v2;
         }
         catch { return ("Unknown", ""); }
     }
@@ -221,6 +230,12 @@ public class NetworkMonitor : IDisposable
             // keep the bytes for the next attempt rather than losing them (e.g. database briefly locked)
             foreach (var r in rows)
                 if (Apps.TryGetValue(r.App, out var s)) { Interlocked.Add(ref s.PendSent, r.Sent); Interlocked.Add(ref s.PendRecv, r.Recv); }
+            // the per-host flows too (these used to be dropped, so Hosts / traffic types / WAN-LAN lost that interval)
+            foreach (var f in flows)
+            {
+                var acc = _flows.GetOrAdd(new FlowKey(f.App, f.Host, f.Port, f.Proto, f.Lan), _ => new FlowAcc());
+                Interlocked.Add(ref acc.Sent, f.Sent); Interlocked.Add(ref acc.Recv, f.Recv);
+            }
             throw;
         }
     }

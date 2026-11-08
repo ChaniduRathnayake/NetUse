@@ -18,7 +18,8 @@
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <Grid Width="20" Height="20" Margin="0,0,10,0" VerticalAlignment="Center">
-          <Image Source="{Binding Icon}" Width="18" Height="18"/>
+          <!-- app icons are square, country flags are wide: Uniform keeps both undistorted -->
+          <Image Source="{Binding Icon}" Width="20" Height="18" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
           <TextBlock Text="{Binding Glyph}" Style="{StaticResource Glyph}" FontSize="13" Foreground="{DynamicResource TextMuted}" HorizontalAlignment="Center"/>
         </Grid>
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
@@ -988,16 +989,58 @@
           <Border Style="{StaticResource Panel}" Padding="20,0" Margin="0,0,0,18">
             <StackPanel Margin="0,-1,0,0">
               <local:SettingRow Title="Start with Windows" Description="Starts minimized to the tray when you sign in. NetUse keeps a copy in Program Files for this.">
-                <CheckBox x:Name="SwStartup" Style="{StaticResource Switch}" Click="SwStartup_Click" AutomationProperties.Name="Start with Windows"/>
+                <CheckBox x:Name="SwStartup" Style="{StaticResource Switch}" Checked="SwStartup_Click" Unchecked="SwStartup_Click" AutomationProperties.Name="Start with Windows"/>
               </local:SettingRow>
               <local:SettingRow Title="Keep running in the tray" Description="Closing the window keeps monitoring in the background.">
-                <CheckBox x:Name="SwTray" Style="{StaticResource Switch}" Click="Switch_Click" Tag="minToTray" AutomationProperties.Name="Keep running in the tray"/>
+                <CheckBox x:Name="SwTray" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="minToTray" AutomationProperties.Name="Keep running in the tray"/>
               </local:SettingRow>
               <local:SettingRow Title="Mini graph" Description="Small always-on-top window with live speed.">
-                <CheckBox x:Name="SwMini" Style="{StaticResource Switch}" Click="SwMini_Click" AutomationProperties.Name="Mini graph"/>
+                <CheckBox x:Name="SwMini" Style="{StaticResource Switch}" Checked="SwMini_Click" Unchecked="SwMini_Click" AutomationProperties.Name="Mini graph"/>
               </local:SettingRow>
               <local:SettingRow Title="Desktop notifications" Description="Turn off for discreet mode: alerts are still recorded, but no pop-ups.">
-                <CheckBox x:Name="SwNotify" Style="{StaticResource Switch}" Click="Switch_Click" Tag="notify" AutomationProperties.Name="Desktop notifications"/>
+                <CheckBox x:Name="SwNotify" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="notify" AutomationProperties.Name="Desktop notifications"/>
+              </local:SettingRow>
+            </StackPanel>
+          </Border>
+
+          <TextBlock x:Name="WidgetSection" Text="SPEED WIDGETS" Style="{StaticResource Cap}" Margin="2,0,0,8"/>
+          <Border Style="{StaticResource Panel}" Padding="20,0" Margin="0,0,0,18">
+            <StackPanel Margin="0,-1,0,0">
+              <local:SettingRow Title="Floating widget" Description="Small always-on-top, see-through window with live readouts. Drag it anywhere, double-click to open NetUse, right-click for options.">
+                <CheckBox x:Name="SwFloat" Style="{StaticResource Switch}" Checked="SwFloat_Click" Unchecked="SwFloat_Click" AutomationProperties.Name="Floating widget"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Taskbar widget" Description="Two-line readout on the Windows taskbar. Text turns black or white with the taskbar colour and hides for full-screen apps.">
+                <CheckBox x:Name="SwBar" Style="{StaticResource Switch}" Checked="SwBar_Click" Unchecked="SwBar_Click" AutomationProperties.Name="Taskbar widget"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Readouts" Description="What both widgets show. Temperature is the ACPI thermal zone your PC reports (many PCs report none). CPU clock is the current speed, including boost."/>
+              <WrapPanel x:Name="WidgetItems" Margin="0,-6,0,14">
+                <CheckBox Content="Upload" Tag="up" Checked="WidgetItem_Click" Unchecked="WidgetItem_Click" Margin="0,0,18,6"/>
+                <CheckBox Content="Download" Tag="down" Checked="WidgetItem_Click" Unchecked="WidgetItem_Click" Margin="0,0,18,6"/>
+                <CheckBox Content="CPU" Tag="cpu" Checked="WidgetItem_Click" Unchecked="WidgetItem_Click" Margin="0,0,18,6"/>
+                <CheckBox Content="Memory" Tag="mem" Checked="WidgetItem_Click" Unchecked="WidgetItem_Click" Margin="0,0,18,6"/>
+                <CheckBox Content="Temperature" Tag="temp" Checked="WidgetItem_Click" Unchecked="WidgetItem_Click" Margin="0,0,18,6"/>
+                <CheckBox Content="CPU clock" Tag="freq" Checked="WidgetItem_Click" Unchecked="WidgetItem_Click" Margin="0,0,18,6"/>
+              </WrapPanel>
+              <local:SettingRow Title="Network connection" Description="Which adapter the speeds come from. Automatic follows the one Windows uses for the internet (Wi-Fi, Ethernet or VPN).">
+                <Button x:Name="AdapterBtn" Style="{StaticResource BtnSecondary}" Click="AdapterBtn_Click" MinWidth="140" AutomationProperties.Name="Network connection"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Floating widget background" Description="How solid the floating widget's background is.">
+                <Border Style="{StaticResource SegBox}">
+                  <StackPanel x:Name="OpacitySeg" Orientation="Horizontal">
+                    <RadioButton Style="{StaticResource Seg}" GroupName="WOpacity" Content="40%" Tag="40" Checked="Opacity_Checked"/>
+                    <RadioButton Style="{StaticResource Seg}" GroupName="WOpacity" Content="60%" Tag="60" Checked="Opacity_Checked"/>
+                    <RadioButton Style="{StaticResource Seg}" GroupName="WOpacity" Content="85%" Tag="85" Checked="Opacity_Checked"/>
+                    <RadioButton Style="{StaticResource Seg}" GroupName="WOpacity" Content="Solid" Tag="100" Checked="Opacity_Checked"/>
+                  </StackPanel>
+                </Border>
+              </local:SettingRow>
+              <local:SettingRow Title="Taskbar widget position" Description="Next to the clock, or at the far end of the taskbar.">
+                <Border Style="{StaticResource SegBox}">
+                  <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="BarRight" Style="{StaticResource Seg}" GroupName="WSide" Content="By the clock" Tag="right" Checked="BarSide_Checked"/>
+                    <RadioButton x:Name="BarLeft" Style="{StaticResource Seg}" GroupName="WSide" Content="Left end" Tag="left" Checked="BarSide_Checked"/>
+                  </StackPanel>
+                </Border>
               </local:SettingRow>
             </StackPanel>
           </Border>
@@ -1006,25 +1049,37 @@
           <Border Style="{StaticResource Panel}" Padding="20,0" Margin="0,0,0,18">
             <StackPanel Margin="0,-1,0,0">
               <local:SettingRow Title="New app uses the network" Description="The first time an app connects.">
-                <CheckBox x:Name="SwAlertNew" Style="{StaticResource Switch}" Click="Switch_Click" Tag="alertNew" AutomationProperties.Name="Alert on new apps"/>
+                <CheckBox x:Name="SwAlertNew" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="alertNew" AutomationProperties.Name="Alert on new apps"/>
               </local:SettingRow>
               <local:SettingRow Title="New device on your network" Description="A device you haven't seen before joins the local network.">
-                <CheckBox x:Name="SwAlertDevice" Style="{StaticResource Switch}" Click="Switch_Click" Tag="alertDevice" AutomationProperties.Name="Alert on new devices"/>
+                <CheckBox x:Name="SwAlertDevice" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="alertDevice" AutomationProperties.Name="Alert on new devices"/>
               </local:SettingRow>
               <local:SettingRow Title="Remote Desktop connections" Description="Someone connects to this PC with Remote Desktop.">
-                <CheckBox x:Name="SwAlertRdp" Style="{StaticResource Switch}" Click="Switch_Click" Tag="alertRdp" AutomationProperties.Name="Alert on Remote Desktop connections"/>
+                <CheckBox x:Name="SwAlertRdp" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="alertRdp" AutomationProperties.Name="Alert on Remote Desktop connections"/>
               </local:SettingRow>
               <local:SettingRow Title="Wi-Fi access point changes" Description="Detects a known network name served by a new or less secure access point (evil twin).">
-                <CheckBox x:Name="SwAlertWifi" Style="{StaticResource Switch}" Click="Switch_Click" Tag="alertWifi" AutomationProperties.Name="Alert on Wi-Fi changes"/>
+                <CheckBox x:Name="SwAlertWifi" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="alertWifi" AutomationProperties.Name="Alert on Wi-Fi changes"/>
               </local:SettingRow>
               <local:SettingRow Title="Hosts file changes" Description="The Windows hosts file can silently redirect websites.">
-                <CheckBox x:Name="SwAlertHosts" Style="{StaticResource Switch}" Click="Switch_Click" Tag="alertHosts" AutomationProperties.Name="Alert on hosts file changes"/>
+                <CheckBox x:Name="SwAlertHosts" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="alertHosts" AutomationProperties.Name="Alert on hosts file changes"/>
               </local:SettingRow>
               <local:SettingRow Title="Traffic spikes" Description="An app uses more than the threshold below.">
-                <CheckBox x:Name="SwAlertSpike" Style="{StaticResource Switch}" Click="Switch_Click" Tag="alertSpike" AutomationProperties.Name="Alert on traffic spikes"/>
+                <CheckBox x:Name="SwAlertSpike" Style="{StaticResource Switch}" Checked="Switch_Click" Unchecked="Switch_Click" Tag="alertSpike" AutomationProperties.Name="Alert on traffic spikes"/>
               </local:SettingRow>
               <local:SettingRow Title="Spike threshold" Description="Per app, in MB/s (0.1 – 10000).">
                 <TextBox x:Name="SpikeBox" Width="110" Tag="" LostKeyboardFocus="NumBox_LostFocus" KeyDown="NumBox_KeyDown" AutomationProperties.Name="Spike threshold in megabytes per second"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Download speed above" Description="Whole connection, in MB/s, for 10 seconds in a row. 0 turns it off.">
+                <TextBox x:Name="DownAlertBox" Width="110" LostKeyboardFocus="NumBox_LostFocus" KeyDown="NumBox_KeyDown" AutomationProperties.Name="Download speed alert in megabytes per second"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Upload speed above" Description="Whole connection, in MB/s, for 10 seconds in a row. 0 turns it off.">
+                <TextBox x:Name="UpAlertBox" Width="110" LostKeyboardFocus="NumBox_LostFocus" KeyDown="NumBox_KeyDown" AutomationProperties.Name="Upload speed alert in megabytes per second"/>
+              </local:SettingRow>
+              <local:SettingRow Title="CPU usage above" Description="Percent, for 10 seconds in a row. 0 turns it off.">
+                <TextBox x:Name="CpuAlertBox" Width="110" LostKeyboardFocus="NumBox_LostFocus" KeyDown="NumBox_KeyDown" AutomationProperties.Name="CPU usage alert percent"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Memory usage above" Description="Percent, for 10 seconds in a row. 0 turns it off. Each usage alert repeats at most every 10 minutes.">
+                <TextBox x:Name="MemAlertBox" Width="110" LostKeyboardFocus="NumBox_LostFocus" KeyDown="NumBox_KeyDown" AutomationProperties.Name="Memory usage alert percent"/>
               </local:SettingRow>
             </StackPanel>
           </Border>
@@ -1045,7 +1100,7 @@
           <Border Style="{StaticResource Panel}" Padding="20,0" Margin="0,0,0,10">
             <StackPanel Margin="0,-1,0,0">
               <local:SettingRow Title="Look up host names" Description="Shows names instead of IP addresses. Each lookup asks your DNS server about that address.">
-                <CheckBox x:Name="SwResolve" Style="{StaticResource Switch}" Click="SwResolve_Click" AutomationProperties.Name="Look up host names"/>
+                <CheckBox x:Name="SwResolve" Style="{StaticResource Switch}" Checked="SwResolve_Click" Unchecked="SwResolve_Click" AutomationProperties.Name="Look up host names"/>
               </local:SettingRow>
               <local:SettingRow Title="Keep history for" Description="Days (1 – 3650). Older usage, alerts and host names are deleted.">
                 <TextBox x:Name="RetBox" Width="110" LostKeyboardFocus="NumBox_LostFocus" KeyDown="NumBox_KeyDown" AutomationProperties.Name="History days"/>
@@ -1059,7 +1114,10 @@
             </StackPanel>
           </Border>
           <TextBlock x:Name="SettingsStatus" Margin="2,4,0,14" TextWrapping="Wrap"/>
-          <TextBlock x:Name="AboutText" Style="{StaticResource Muted}" Margin="2,0,0,20" TextWrapping="Wrap"/>
+          <DockPanel Margin="2,0,0,20">
+            <Button DockPanel.Dock="Right" Content="About NetUse…" Style="{StaticResource BtnGhost}" Click="About_Click" VerticalAlignment="Center"/>
+            <TextBlock x:Name="AboutText" Style="{StaticResource Muted}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          </DockPanel>
         </StackPanel>
       </ScrollViewer>
     </Grid>

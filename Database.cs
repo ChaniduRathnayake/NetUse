@@ -19,7 +19,7 @@ public class Database
     public static string Dir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NetUse");
 
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private readonly string _cs;
     private readonly object _lock = new();
     private readonly Dictionary<string, string> _cache = new();
@@ -42,7 +42,9 @@ public class Database
                CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, type TEXT, message TEXT, is_read INTEGER DEFAULT 0);
                CREATE INDEX IF NOT EXISTS ix_alerts_ts ON alerts(ts);
                CREATE TABLE IF NOT EXISTS blocked(name TEXT PRIMARY KEY, path TEXT);
-               CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);");
+               CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+               CREATE TABLE IF NOT EXISTS app_paths(path TEXT PRIMARY KEY COLLATE NOCASE, name TEXT NOT NULL, first_seen INTEGER);
+               CREATE INDEX IF NOT EXISTS ix_app_paths_name ON app_paths(name COLLATE NOCASE);");
         var cols = Query("PRAGMA table_info(alerts)", r => r.GetString(1)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var col in new[] { "app TEXT", "path TEXT", "remote TEXT", "proto TEXT", "sent INTEGER", "recv INTEGER" })
             if (!cols.Contains(col.Split(' ')[0])) Exec("ALTER TABLE alerts ADD COLUMN " + col);
@@ -54,6 +56,11 @@ public class Database
             Exec(@"INSERT OR REPLACE INTO daily(day, app, sent, recv)
                    SELECT CAST(strftime('%s', date(ts, 'unixepoch', 'localtime'), 'utc') AS INTEGER) AS d, app, SUM(sent), SUM(recv)
                    FROM usage GROUP BY d, app;");
+        }
+        if (ver < 3)
+        {
+            // one-time: the program locations known so far are the baseline for "new location" alerts
+            Exec("INSERT OR IGNORE INTO app_paths(path, name, first_seen) SELECT path, name, first_seen FROM apps WHERE COALESCE(path,'')<>'';");
         }
         Exec($"PRAGMA user_version={SchemaVersion};");
     }
@@ -236,6 +243,22 @@ public class Database
                 r => new AppRow(r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), 0, 0))
             .ToDictionary(a => a.Name, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Records a program location; true if it wasn't known before.</summary>
+    public bool AddAppPath(string name, string path, long now)
+    {
+        lock (_lock)
+        {
+            using var c = Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "INSERT OR IGNORE INTO app_paths(path, name, first_seen) VALUES($p, $n, $t)";
+            cmd.Parameters.AddWithValue("$p", path); cmd.Parameters.AddWithValue("$n", name); cmd.Parameters.AddWithValue("$t", now);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+    }
+
+    public List<string> GetAppPaths(string name) =>
+        Query("SELECT path FROM app_paths WHERE name=$n COLLATE NOCASE ORDER BY first_seen", r => r.GetString(0), ("$n", name));
+
     // ================================================================= hosts (reverse DNS cache)
     public Dictionary<string, string> GetHostNames() =>
         Query("SELECT ip, name FROM hosts", r => (r.GetString(0), r.GetString(1)))
@@ -272,7 +295,7 @@ public class Database
     }
 
     public void ClearHistory() =>
-        Exec("DELETE FROM usage; DELETE FROM daily; DELETE FROM flows; DELETE FROM apps; DELETE FROM alerts; DELETE FROM hosts; DELETE FROM devices; DELETE FROM wifi;");
+        Exec("DELETE FROM usage; DELETE FROM daily; DELETE FROM flows; DELETE FROM apps; DELETE FROM app_paths; DELETE FROM alerts; DELETE FROM hosts; DELETE FROM devices; DELETE FROM wifi;");
 
     public void ExportCsv(string file)
     {

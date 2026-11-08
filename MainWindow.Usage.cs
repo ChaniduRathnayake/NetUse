@@ -89,8 +89,13 @@ public partial class MainWindow
         {
             string name = HostNames.Get(kv.Key);
             bool lan = lanHosts.Contains(kv.Key);
-            return (kv.Key, name.Length > 0 ? name : kv.Key, name.Length > 0 ? kv.Key : lan ? "Local network" : "",
-                null, lan ? "" : "", kv.Key);
+            // destination country from the offline table: flag in the icon slot, country name under the host
+            string cc = lan ? "" : GeoIp.Country(kv.Key);
+            string country = GeoIp.Name(cc);
+            var flag = Flags.Get(cc);
+            string sub = string.Join("  ·  ", new[] { name.Length > 0 ? kv.Key : "", lan ? "Local network" : country }.Where(x => x.Length > 0));
+            string tip = kv.Key + (name.Length > 0 ? "\n" + name : "") + (country.Length > 0 ? "\n" + country : "");
+            return (kv.Key, name.Length > 0 ? name : kv.Key, sub, flag, flag != null ? "" : lan ? "" : "", tip);
         }, _selHost);
 
         // --- traffic type column

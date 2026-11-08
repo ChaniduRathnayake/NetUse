@@ -34,12 +34,21 @@ public partial class MainWindow : Window
     private readonly DateTime _startedAt = DateTime.Now;
     private readonly bool _firstRun;
     private System.Windows.Forms.NotifyIcon? _tray;
-    private System.Windows.Forms.ToolStripMenuItem? _trayPause, _trayMini;
+    private System.Windows.Forms.ToolStripMenuItem? _trayPause, _trayMini, _trayFloat, _trayBar;
     private MiniGraph? _mini;
     private string _page = "Overview";
     private string _theme = "dark";
     private int _tick, _alertsVersion;
-    private bool _quit, _ready;
+    private bool _quit, _ready, _syncing;
+
+    /// <summary>Sets a switch from code without running its handler. Handlers listen to Checked/Unchecked so that
+    /// keyboard and UI Automation (screen reader) toggles apply the setting too, not only mouse clicks.</summary>
+    private void SetQuiet(System.Windows.Controls.Primitives.ToggleButton t, bool value)
+    {
+        bool was = _syncing;
+        _syncing = true;
+        try { t.IsChecked = value; } finally { _syncing = was; }
+    }
 
     private static readonly Dictionary<string, (string file, string title)> Themes = new()
     {
@@ -94,6 +103,7 @@ public partial class MainWindow : Window
 
         SetupTray();
         _mon.AppSeen += OnAppSeen;
+        _mon.PathSeen += OnPathSeen;
         _mon.Start();
         _timer.Tick += (_, _) => OnTick();
         _timer.Start();
@@ -106,6 +116,7 @@ public partial class MainWindow : Window
         _ready = true;
         StartWatch();
         if (_db.GetBool("miniGraph", false)) ShowMini(true);
+        InitWidgets();
     }
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -231,6 +242,7 @@ public partial class MainWindow : Window
         _samplesEnd = Now;
         Push(_cpu, _hw.Cpu());
         Push(_mem, HardwareMonitor.Memory().pct);
+        try { WidgetTick(_cpu[^1], _mem[^1]); } catch (Exception ex) { App.Log(ex); }
 
         UpdateStatus();
         if (_tray != null)
@@ -335,7 +347,7 @@ public partial class MainWindow : Window
         }
         else _mini?.Hide();
         _db.SetBool("miniGraph", show);
-        SwMini.IsChecked = show;
+        SetQuiet(SwMini, show);
         if (_trayMini != null) _trayMini.Checked = show;
     }
 
@@ -343,8 +355,8 @@ public partial class MainWindow : Window
     /// <summary>(theme brush key, badge kind, category) for an alert type.</summary>
     private static (string key, string kind, string category) EventStyle(string type) => type switch
     {
-        "New app" or "Blocked" or "Remote Desktop" or "Evil twin" => ("Danger", "bad", "Security"),
-        "Spike" or "Data plan" or "New device" or "Hosts file" or "Firewall" => ("Warning", "warn", "Warning"),
+        "New app" or "New location" or "Blocked" or "Remote Desktop" or "Evil twin" => ("Danger", "bad", "Security"),
+        "Spike" or "Speed" or "CPU" or "Memory" or "Data plan" or "New device" or "Hosts file" or "Firewall" => ("Warning", "warn", "Warning"),
         _ => ("Info", "info", "Information")
     };
 
@@ -355,7 +367,8 @@ public partial class MainWindow : Window
         "Remote Desktop" => "",
         "Wi-Fi" or "Evil twin" => "",
         "Hosts file" => "",
-        "Data plan" or "Spike" => "",
+        "CPU" or "Memory" => "",
+        "Data plan" or "Spike" or "Speed" => "",
         "Firewall" or "Blocked" or "Allowed" => "",
         _ => ""
     };
@@ -478,10 +491,18 @@ public partial class MainWindow : Window
         _trayMini = new System.Windows.Forms.ToolStripMenuItem("Mini graph") { Checked = _db.GetBool("miniGraph", false) };
         _trayMini.Click += (_, _) => ShowMini(!_trayMini.Checked);
         menu.Items.Add(_trayMini);
+        _trayFloat = new System.Windows.Forms.ToolStripMenuItem("Floating widget") { Checked = _db.GetBool("widgetFloat", false) };
+        _trayFloat.Click += (_, _) => ShowFloat(!_trayFloat.Checked);
+        menu.Items.Add(_trayFloat);
+        _trayBar = new System.Windows.Forms.ToolStripMenuItem("Taskbar widget") { Checked = _db.GetBool("widgetBar", false) };
+        _trayBar.Click += (_, _) => ShowBar(!_trayBar.Checked);
+        menu.Items.Add(_trayBar);
         _trayPause = new System.Windows.Forms.ToolStripMenuItem("Pause monitoring");
         _trayPause.Click += (_, _) => SetPaused(!_mon.Paused);
         menu.Items.Add(_trayPause);
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        menu.Items.Add("Task Manager", null, (_, _) => Shell.TaskManager());
+        menu.Items.Add("About NetUse", null, (_, _) => AboutWindow.Show(IsVisible ? this : null));
         menu.Items.Add("Exit", null, (_, _) => ExitApp());
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => ShowMain();
@@ -502,6 +523,9 @@ public partial class MainWindow : Window
         SafeFlush();
         if (_tray != null) { _tray.Visible = false; _tray.Dispose(); }
         _mini?.Close();
+        _float?.Close();
+        _bar?.Close();
+        _sensors?.Dispose();
         _mon.Dispose();
         Application.Current.Shutdown();
     }

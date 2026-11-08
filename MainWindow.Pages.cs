@@ -166,7 +166,7 @@ public partial class MainWindow
         SwStartup.IsEnabled = false;
         Task.Run(StartupTask.IsEnabled).ContinueWith(t => Dispatcher.InvokeAsync(() =>
         {
-            SwStartup.IsChecked = t.IsCompletedSuccessfully && t.Result;
+            SetQuiet(SwStartup, t.IsCompletedSuccessfully && t.Result);
             SwStartup.IsEnabled = true;
         }));
     }
@@ -179,15 +179,17 @@ public partial class MainWindow
 
     private void Switch_Click(object sender, RoutedEventArgs e)
     {
+        if (!_ready || _syncing) return;
         if (sender is not CheckBox cb || cb.Tag is not string key) return;
         _db.SetBool(key, cb.IsChecked == true);
         SetStatus("Saved.", false);
     }
 
-    private void SwMini_Click(object sender, RoutedEventArgs e) => ShowMini(SwMini.IsChecked == true);
+    private void SwMini_Click(object sender, RoutedEventArgs e) { if (_ready && !_syncing) ShowMini(SwMini.IsChecked == true); }
 
     private void SwResolve_Click(object sender, RoutedEventArgs e)
     {
+        if (!_ready || _syncing) return;
         bool on = SwResolve.IsChecked == true;
         _db.SetBool("resolveHosts", on);
         HostNames.Enabled = on;
@@ -196,6 +198,7 @@ public partial class MainWindow
 
     private async void SwStartup_Click(object sender, RoutedEventArgs e)
     {
+        if (!_ready || _syncing) return;
         bool want = SwStartup.IsChecked == true;
         SwStartup.IsEnabled = false;
         var (ok, err) = await Task.Run(() =>
@@ -208,7 +211,7 @@ public partial class MainWindow
         if (ok) SetStatus(want ? "NetUse will start with Windows." : "NetUse won't start with Windows.", false);
         else
         {
-            SwStartup.IsChecked = !want;
+            SetQuiet(SwStartup, !want);
             SetStatus("The Windows startup entry was not changed. " + err, true);
         }
     }
@@ -233,6 +236,10 @@ public partial class MainWindow
             nameof(CapBox) => ("capGB", 0.0, 1_000_000.0, false, "Data cap must be 0 or more GB."),
             nameof(BillBox) => ("billDay", 1.0, 28.0, true, "Billing day must be a whole number from 1 to 28."),
             nameof(RetBox) => ("retention", 1.0, 3650.0, true, "History must be a whole number of days from 1 to 3650."),
+            nameof(DownAlertBox) => ("alertDownMB", 0.0, 100000.0, false, "Download alert must be 0 (off) or a speed in MB/s up to 100000."),
+            nameof(UpAlertBox) => ("alertUpMB", 0.0, 100000.0, false, "Upload alert must be 0 (off) or a speed in MB/s up to 100000."),
+            nameof(CpuAlertBox) => ("alertCpu", 0.0, 100.0, true, "CPU alert must be a whole percentage from 0 (off) to 100."),
+            nameof(MemAlertBox) => ("alertMem", 0.0, 100.0, true, "Memory alert must be a whole percentage from 0 (off) to 100."),
             _ => ("", 0.0, 0.0, false, "")
         };
         if (key.Length == 0) return;

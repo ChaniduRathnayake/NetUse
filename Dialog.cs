@@ -68,7 +68,8 @@ public static class Dialog
             win.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, dur));
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.96, 1, dur));
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.96, 1, dur));
-            ok.Focus();
+            // a destructive confirmation must not be one stray Enter away: focus Cancel for those
+            (danger ? cancel : ok).Focus();
         };
         win.ShowDialog();
         return result;

@@ -88,6 +88,76 @@
         </Setter>
       </Style>
 
+      <!-- ================= Context menus (widgets, adapter picker) ================= -->
+      <Style TargetType="ContextMenu">
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="HasDropShadow" Value="False"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ContextMenu">
+              <Border Background="{DynamicResource Card}" BorderBrush="{DynamicResource BorderStrong}" BorderThickness="1"
+                      CornerRadius="10" Padding="4" Margin="0,0,10,10" Effect="{StaticResource SoftShadow}">
+                <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator">
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Separator">
+              <Border Height="1" Margin="10,4" Background="{DynamicResource Border}"/>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style TargetType="MenuItem">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="MenuItem">
+              <Grid>
+                <Border x:Name="Bd" CornerRadius="6" Padding="8,6,10,6" Background="Transparent" MinWidth="210">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="26"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <ContentPresenter x:Name="IconHost" ContentSource="Icon" VerticalAlignment="Center" HorizontalAlignment="Left"
+                                      TextElement.Foreground="{DynamicResource TextSecondary}"/>
+                    <TextBlock x:Name="Check" Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="12" VerticalAlignment="Center"
+                               Foreground="{DynamicResource Primary}" Visibility="Collapsed"/>
+                    <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="Arrow" Grid.Column="2" Text="&#xE76C;" FontFamily="{StaticResource IconFont}" FontSize="10"
+                               VerticalAlignment="Center" Margin="14,0,0,0" Foreground="{DynamicResource TextMuted}" Visibility="Collapsed"/>
+                  </Grid>
+                </Border>
+                <Popup x:Name="PART_Popup" Placement="Right" HorizontalOffset="0" VerticalOffset="-5" AllowsTransparency="True"
+                       Focusable="False" PopupAnimation="Fade" IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}">
+                  <Border Background="{DynamicResource Card}" BorderBrush="{DynamicResource BorderStrong}" BorderThickness="1"
+                          CornerRadius="10" Padding="4" Margin="0,0,10,10" Effect="{StaticResource SoftShadow}">
+                    <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                  </Border>
+                </Popup>
+              </Grid>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Bd" Property="Background" Value="{DynamicResource Hover}"/></Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                  <Setter TargetName="IconHost" Property="Visibility" Value="Collapsed"/>
+                </Trigger>
+                <Trigger Property="Role" Value="SubmenuHeader"><Setter TargetName="Arrow" Property="Visibility" Value="Visible"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource TextMuted}"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
       <!-- ================= Badge: Tag = ok | bad | warn | off | info ================= -->
       <Style x:Key="Badge" TargetType="ContentControl">
         <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>

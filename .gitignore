@@ -9,6 +9,7 @@ installer/
 
 # installers are published as GitHub Release assets, not committed
 /NetUse.exe
+/*.dll
 setup/Windows/*.exe
 setup/Windows/*.zip
 setup/Android/*.apk
