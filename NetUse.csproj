@@ -14,7 +14,7 @@
     <RootNamespace>NetUse</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.4.0</Version>
+    <Version>1.5.0</Version>
     <Product>NetUse</Product>
     <Company>NetUse</Company>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
@@ -46,6 +46,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- tools/ holds separate helper projects (icon generator...), not part of NetUse itself -->
+    <Compile Remove="tools\**" />
+    <None Remove="tools\**" />
     <!-- app icon (128px frame of app.ico) shown as the logo in the title bar and About -->
     <Resource Include="app.png" />
     <!-- country flags for destinations (public domain, flagcdn.com) -->

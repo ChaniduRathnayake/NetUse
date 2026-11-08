@@ -17,6 +17,20 @@ public partial class MainWindow
     private System.Windows.Forms.ToolStripMenuItem? _trayRouting;
     private readonly DispatcherTimer _rtTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
 
+    /// <summary>The controls of one app row, kept so a refresh only updates what changed (no rebuilt, re-animating switches).</summary>
+    private sealed class RuleRowUi
+    {
+        public Grid Root = null!;
+        public TextBlock Name = null!, Exes = null!;
+        public ContentControl Badge = null!;
+        public Button Pick = null!;
+        public CheckBox Switch = null!;
+        public RuleView View = null!;
+    }
+
+    private readonly Dictionary<string, RuleRowUi> _rtRows = new();
+    private string _rtRulesKey = "", _rtNetKey = "";
+
     private void InitRouting()
     {
         try
@@ -70,50 +84,79 @@ public partial class MainWindow
         SetQuiet(SwRouting, cfg.Enabled);
         SetQuiet(SwRtMove, cfg.MoveConnections);
         SetQuiet(SwRtLookup, cfg.LookupPublicIp);
-        RtLookupRow.Description = $"Asks {new Uri(cfg.LookupUrl).Host} through each network for its public address, country and provider. Nothing else is sent.";
+        SetText(RtLookupRow, $"Asks {new Uri(cfg.LookupUrl).Host} through each network for its public address, country and provider. Nothing else is sent.");
 
         var enabled = rules.Where(r => r.Rule.Enabled).ToList();
         int active = enabled.Count(r => r.Status == RuleStatus.Active);
         int waiting = enabled.Count(r => r.Status is RuleStatus.Fallback or RuleStatus.Waiting or RuleStatus.NoNetwork);
-        string fill, fg;
+        string fill, fg, title, sub;
         if (!cfg.Enabled)
         {
-            RtStateText.Text = "App Routing is off";
-            RtStateSub.Text = "Every app follows Windows' normal routing (through your VPN when it's on).";
+            title = "App Routing is off";
+            sub = "Every app follows Windows' normal routing (through your VPN when it's on).";
             (fill, fg) = ("MutedFill", "TextMuted");
         }
         else if (enabled.Count == 0)
         {
-            RtStateText.Text = "App Routing is on";
-            RtStateSub.Text = "Add an app to send it through another network. Everything else follows Windows' normal routing.";
+            title = "App Routing is on";
+            sub = "Add an app to send it through another network. Everything else follows Windows' normal routing.";
             (fill, fg) = ("InfoFill", "Info");
         }
         else
         {
-            RtStateText.Text = $"App Routing is on  ·  {active} of {enabled.Count} app{(enabled.Count == 1 ? "" : "s")} routed";
-            RtStateSub.Text = waiting > 0
+            title = $"App Routing is on  ·  {active} of {enabled.Count} app{(enabled.Count == 1 ? "" : "s")} routed";
+            sub = waiting > 0
                 ? $"{waiting} app{(waiting == 1 ? " is" : "s are")} using Windows' normal route because {(waiting == 1 ? "its" : "their")} network isn't available."
                 : "Other apps keep following Windows' normal routing.";
             (fill, fg) = waiting > 0 ? ("WarningFill", "Warning") : ("SuccessFill", "Success");
         }
+        SetText(RtStateText, title);
+        SetText(RtStateSub, sub);
         RtStateIcon.SetResourceReference(Border.BackgroundProperty, fill);
         RtStateGlyph.SetResourceReference(TextBlock.ForegroundProperty, fg);
         string err = _routing.LastError;
-        RtError.Text = err;
+        SetText(RtError, err);
         RtError.Visibility = err.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         var def = adapters.FirstOrDefault(a => a.Id == cfg.DefaultNetwork);
-        RtDefaultBtn.Content = def != null ? def.Name : cfg.DefaultNetwork.Length > 0 ? "Not connected" : "Choose…";
+        SetContent(RtDefaultBtn, def != null ? def.Name : cfg.DefaultNetwork.Length > 0 ? "Not connected" : "Choose…");
 
-        RtRules.Children.Clear();
-        foreach (var r in rules) RtRules.Children.Add(RuleRow(r, adapters, cfg, def));
+        // App rows: built once per set of apps, then only updated in place. Rebuilding them on every change (each newly
+        // routed address) recreated the switches, which then replayed their on-animation and looked like they flickered.
+        string rulesKey = string.Join("\u001e", rules.Select(r => r.Rule.Id + "\u001f" + string.Join(",", r.Rule.Exes)));
+        if (rulesKey != _rtRulesKey)
+        {
+            RtRules.Children.Clear();
+            _rtRows.Clear();
+            foreach (var v in rules)
+            {
+                var ui = BuildRuleRow(v);
+                _rtRows[v.Rule.Id] = ui;
+                RtRules.Children.Add(ui.Root);
+            }
+            _rtRulesKey = rulesKey;
+        }
+        foreach (var v in rules)
+            if (_rtRows.TryGetValue(v.Rule.Id, out var ui)) UpdateRuleRow(ui, v, adapters, cfg, def);
         RtEmpty.Visibility = rules.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-        RtNetworks.Children.Clear();
-        foreach (var a in adapters) RtNetworks.Children.Add(NetworkRow(a));
+        // Network rows: rebuilt only when something shown about a network changed
+        string netKey = string.Join("\u001e", adapters.Select(a =>
+            $"{a.Id}|{a.Name}|{a.Signature}|{(_routing.PublicInfo(a) is { } p ? p.Ip + p.CountryCode + p.Provider : "")}"));
+        if (netKey != _rtNetKey)
+        {
+            RtNetworks.Children.Clear();
+            foreach (var a in adapters) RtNetworks.Children.Add(NetworkRow(a));
+            _rtNetKey = netKey;
+        }
 
         if (cfg.LookupPublicIp) _routing.RefreshPublic(false);
     }
+
+    // set only when different, so an unchanged refresh touches nothing on screen
+    private static void SetText(TextBlock t, string s) { if (t.Text != s) t.Text = s; }
+    private static void SetText(SettingRow r, string s) { if (r.Description != s) r.Description = s; }
+    private static void SetContent(ContentControl c, string s) { if (!Equals(c.Content, s)) c.Content = s; }
 
     private static string KindGlyph(NetKind k) => k switch
     {
@@ -172,40 +215,40 @@ public partial class MainWindow
         return g;
     }
 
-    private FrameworkElement RuleRow(RuleView v, List<NetAdapter> adapters, RoutingConfig cfg, NetAdapter? def)
+    /// <summary>Builds one app row. Its buttons read the row's current state when clicked, never a copy from build time.</summary>
+    private RuleRowUi BuildRuleRow(RuleView v)
     {
-        var r = v.Rule;
-        var g = new Grid { Margin = new Thickness(0, 6, 0, 6) };
+        string id = v.Rule.Id;
+        var ui = new RuleRowUi { View = v };
+        var g = ui.Root = new Grid { Margin = new Thickness(0, 6, 0, 6) };
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(38) });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        g.Children.Add(new Image { Source = IconCache.Get(r.Exes.FirstOrDefault() ?? ""), Width = 24, Height = 24, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left });
+        g.Children.Add(new Image { Source = IconCache.Get(v.Rule.Exes.FirstOrDefault() ?? ""), Width = 24, Height = 24, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left });
 
         var mid = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
-        mid.Children.Add(Tb(r.Name, "TextPrimary", 13, true));
-        mid.Children.Add(Tb(string.Join(", ", r.Exes.Select(Path.GetFileName)), "TextMuted", 11.5));
-        var (status, kind) = RuleStatusText(v, cfg);
-        var badge = new ContentControl { Style = (Style)FindResource("Badge"), Content = status, Tag = kind, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
-        mid.Children.Add(badge);
-        mid.ToolTip = string.Join("\n", r.Exes);
+        mid.Children.Add(ui.Name = Tb("", "TextPrimary", 13, true));
+        mid.Children.Add(ui.Exes = Tb("", "TextMuted", 11.5));
+        mid.Children.Add(ui.Badge = new ContentControl { Style = (Style)FindResource("Badge"), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) });
+        mid.ToolTip = string.Join("\n", v.Rule.Exes);
         Grid.SetColumn(mid, 1);
         g.Children.Add(mid);
 
-        string netName = r.Network.Length == 0
-            ? "Default network" + (def != null ? $" ({def.Name})" : "")
-            : adapters.FirstOrDefault(a => a.Id == r.Network) is { } n ? NetLabel(n) : "Not connected";
-        var pick = new Button { Style = (Style)FindResource("BtnSecondary"), Content = netName, MinWidth = 160, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
-        System.Windows.Automation.AutomationProperties.SetName(pick, $"Network for {r.Name}");
-        pick.Click += (_, _) => ShowNetworkMenu(pick, adapters, r.Network, allowDefault: true, id => _routing?.SetRuleNetwork(r.Id, id));
+        var pick = ui.Pick = new Button { Style = (Style)FindResource("BtnSecondary"), MinWidth = 160, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        pick.Click += (_, _) =>
+        {
+            if (_routing == null) return;
+            var (_, adapters, _) = _routing.Snapshot();
+            ShowNetworkMenu(pick, adapters, ui.View.Rule.Network, allowDefault: true, net => _routing.SetRuleNetwork(id, net));
+        };
         Grid.SetColumn(pick, 2);
         g.Children.Add(pick);
 
-        var sw = new CheckBox { Style = (Style)FindResource("Switch"), IsChecked = r.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
-        System.Windows.Automation.AutomationProperties.SetName(sw, $"Route {r.Name}");
-        RoutedEventHandler toggled = (_, _) => _routing?.SetRuleEnabled(r.Id, sw.IsChecked == true);
+        var sw = ui.Switch = new CheckBox { Style = (Style)FindResource("Switch"), IsChecked = v.Rule.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+        RoutedEventHandler toggled = (_, _) => { if (!_syncing) _routing?.SetRuleEnabled(id, sw.IsChecked == true); };
         sw.Checked += toggled;
         sw.Unchecked += toggled;
         Grid.SetColumn(sw, 3);
@@ -213,25 +256,45 @@ public partial class MainWindow
 
         var more = new Button { Style = (Style)FindResource("IconBtn"), VerticalAlignment = VerticalAlignment.Center, ToolTip = "More" };
         Ui.SetGlyph(more, "");
-        System.Windows.Automation.AutomationProperties.SetName(more, $"More options for {r.Name}");
+        System.Windows.Automation.AutomationProperties.SetName(more, $"More options for {v.Rule.Name}");
         more.Click += (_, _) =>
         {
+            var cur = ui.View;
             var cm = new ContextMenu { PlacementTarget = more, Placement = PlacementMode.Bottom };
-            cm.Items.Add(Mi("Add a helper program…", "", () => BrowseProgram(r.Id)));
-            if (v.Routed > 0) cm.Items.Add(Mi($"Forget {v.Routed} learned address{(v.Routed == 1 ? "" : "es")}", "", () => _routing?.Forget(r.Id)));
-            if (r.Exes.Count > 1)
+            cm.Items.Add(Mi("Add a helper program…", "", () => BrowseProgram(id)));
+            if (cur.Routed > 0) cm.Items.Add(Mi($"Forget {cur.Routed} learned address{(cur.Routed == 1 ? "" : "es")}", "", () => _routing?.Forget(id)));
+            if (cur.Rule.Exes.Count > 1)
             {
                 cm.Items.Add(new Separator());
-                foreach (var exe in r.Exes)
-                    cm.Items.Add(Mi($"Remove {Path.GetFileName(exe)}", "", () => _routing?.RemoveProgram(r.Id, exe)));
+                foreach (var exe in cur.Rule.Exes)
+                    cm.Items.Add(Mi($"Remove {Path.GetFileName(exe)}", "", () => _routing?.RemoveProgram(id, exe)));
             }
             cm.Items.Add(new Separator());
-            cm.Items.Add(Mi("Remove this app", "", () => _routing?.RemoveRule(r.Id)));
+            cm.Items.Add(Mi("Remove this app", "", () => _routing?.RemoveRule(id)));
             cm.IsOpen = true;
         };
         Grid.SetColumn(more, 4);
         g.Children.Add(more);
-        return g;
+        return ui;
+    }
+
+    /// <summary>Brings a row up to date, touching only what changed (a switch already in the right position isn't touched).</summary>
+    private void UpdateRuleRow(RuleRowUi ui, RuleView v, List<NetAdapter> adapters, RoutingConfig cfg, NetAdapter? def)
+    {
+        ui.View = v;
+        var r = v.Rule;
+        SetText(ui.Name, r.Name);
+        SetText(ui.Exes, string.Join(", ", r.Exes.Select(Path.GetFileName)));
+        var (status, kind) = RuleStatusText(v, cfg);
+        SetContent(ui.Badge, status);
+        if (!Equals(ui.Badge.Tag, kind)) ui.Badge.Tag = kind;
+        string netName = r.Network.Length == 0
+            ? "Default network" + (def != null ? $" ({def.Name})" : "")
+            : adapters.FirstOrDefault(a => a.Id == r.Network) is { } n ? NetLabel(n) : "Not connected";
+        SetContent(ui.Pick, netName);
+        System.Windows.Automation.AutomationProperties.SetName(ui.Pick, $"Network for {r.Name}");
+        System.Windows.Automation.AutomationProperties.SetName(ui.Switch, $"Route {r.Name}");
+        if (ui.Switch.IsChecked != r.Enabled) SetQuiet(ui.Switch, r.Enabled);
     }
 
     private static (string text, string kind) RuleStatusText(RuleView v, RoutingConfig cfg)

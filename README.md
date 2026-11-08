@@ -137,4 +137,5 @@ NetUse is Windows-only. It relies on kernel ETW tracing and Windows Firewall, so
 | `App.xaml`, `Themes/` | Design system (styles) and colour tokens; every colour is a named token in `Themes/*.xaml` |
 | `setup/` | Inno Setup installer script and portable-package readme |
 | `tools/make-geoip.py` | Rebuilds the country table |
+| `tools/icon/` | Draws the app icon (`dotnet run --project tools/icon -- .` writes `app.ico` and `app.png`) |
 | `build.bat` | Builds the exe, the portable zip and the installer |
