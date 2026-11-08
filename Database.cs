@@ -19,13 +19,13 @@ public class Database
     /// <summary>%ProgramData%\NetUse, resolved without the (user-controllable) environment: see <see cref="TrustedPaths"/>.</summary>
     public static string Dir => Path.Combine(TrustedPaths.ProgramData, "NetUse");
 
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 5;
     private readonly string _cs;
     private readonly object _lock = new();
     private readonly Dictionary<string, string> _cache = new();
 
     private static readonly string[] Tables =
-        { "usage", "daily", "flows", "hosts", "devices", "wifi", "apps", "alerts", "blocked", "settings", "app_paths" };
+        { "usage", "daily", "flows", "hosts", "devices", "wifi", "apps", "alerts", "blocked", "settings", "app_paths", "route_learned" };
 
     /// <summary>Set when the database was set aside at startup (for an alert).</summary>
     public string? TamperNote { get; }
@@ -56,7 +56,8 @@ public class Database
                CREATE TABLE IF NOT EXISTS blocked(name TEXT PRIMARY KEY, path TEXT);
                CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
                CREATE TABLE IF NOT EXISTS app_paths(path TEXT PRIMARY KEY COLLATE NOCASE, name TEXT NOT NULL, first_seen INTEGER);
-               CREATE INDEX IF NOT EXISTS ix_app_paths_name ON app_paths(name COLLATE NOCASE);");
+               CREATE INDEX IF NOT EXISTS ix_app_paths_name ON app_paths(name COLLATE NOCASE);
+               CREATE TABLE IF NOT EXISTS route_learned(rule TEXT NOT NULL, ip TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(rule, ip));");
         var cols = Query("PRAGMA table_info(alerts)", r => r.GetString(1)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var col in new[] { "app TEXT", "path TEXT", "remote TEXT", "proto TEXT", "sent INTEGER", "recv INTEGER" })
             if (!cols.Contains(col.Split(' ')[0])) Exec("ALTER TABLE alerts ADD COLUMN " + col);
@@ -325,6 +326,23 @@ public class Database
     public List<string> GetAppPaths(string name) =>
         Query("SELECT path FROM app_paths WHERE name=$n COLLATE NOCASE ORDER BY first_seen", r => r.GetString(0), ("$n", name));
 
+    // ================================================================= App Routing: addresses each rule's programs use
+    public Dictionary<string, List<string>> GetLearned()
+    {
+        var d = new Dictionary<string, List<string>>();
+        foreach (var (rule, ip) in Query("SELECT rule, ip FROM route_learned ORDER BY last_seen DESC", r => (r.GetString(0), r.GetString(1))))
+        {
+            if (!d.TryGetValue(rule, out var list)) d[rule] = list = new List<string>();
+            if (list.Count < 4096 && System.Net.IPAddress.TryParse(ip, out _)) list.Add(ip);
+        }
+        return d;
+    }
+
+    public void AddLearned(string rule, string ip, long now) =>
+        Exec("INSERT OR REPLACE INTO route_learned(rule, ip, last_seen) VALUES($r, $i, $t)", ("$r", rule), ("$i", ip), ("$t", now));
+
+    public void ForgetLearned(string rule) => Exec("DELETE FROM route_learned WHERE rule=$r", ("$r", rule));
+
     // ================================================================= hosts (reverse DNS cache)
     public Dictionary<string, string> GetHostNames() =>
         Query("SELECT ip, name FROM hosts", r => (r.GetString(0), r.GetString(1)))
@@ -357,7 +375,7 @@ public class Database
         if (days <= 0) return;
         long t = DateTimeOffset.UtcNow.AddDays(-days).ToUnixTimeSeconds();
         Exec(@"DELETE FROM usage WHERE ts<$t; DELETE FROM flows WHERE ts<$t; DELETE FROM daily WHERE day<$t;
-               DELETE FROM alerts WHERE ts<$t; DELETE FROM hosts WHERE ts<$t;", ("$t", t));
+               DELETE FROM alerts WHERE ts<$t; DELETE FROM hosts WHERE ts<$t; DELETE FROM route_learned WHERE last_seen<$t;", ("$t", t));
     }
 
     public void ClearHistory() =>

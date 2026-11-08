@@ -54,6 +54,8 @@ public class NetworkMonitor : IDisposable
     /// real app's name and never raise a "New app" alert.
     /// </summary>
     public event Action<string, string>? PathSeen;
+    /// <summary>Sees every packet's program path and endpoints (App Routing). Must return quickly.</summary>
+    public RoutingEngine? Router;
     private readonly ConcurrentDictionary<string, byte> _paths = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -136,7 +138,7 @@ public class NetworkMonitor : IDisposable
 
     private void AddCore(int pid, int bytes, bool sent, IPAddress? saddr, IPAddress? daddr, int sport, int dport, string proto)
     {
-        if (Paused || pid < 0 || bytes <= 0) return;
+        if (pid < 0 || bytes <= 0 || (Paused && Router == null)) return;
 
         // The remote end is whichever address is not one of ours.
         bool dSelf = IsSelf(daddr), sSelf = IsSelf(saddr);
@@ -145,6 +147,9 @@ public class NetworkMonitor : IDisposable
         int rport = !dSelf ? dport : sport, lport = !dSelf ? sport : dport;
 
         var (name, path) = Resolve(pid);
+        Router?.Observe(path, !dSelf ? saddr! : daddr!, remote, lport, rport, proto == "TCP");
+        if (Paused) return; // usage isn't recorded while paused (App Routing above still sees the traffic)
+
         if (!Apps.TryGetValue(name, out var s))
         {
             var created = new AppStats { Name = name, Path = path };
@@ -215,7 +220,7 @@ public class NetworkMonitor : IDisposable
             string path = "";
             try { path = p.MainModule?.FileName ?? ""; } catch { }
             var v2 = _pids[pid] = (p.ProcessName, path);
-            if (path.Length > 0 && _paths.TryAdd(path, 0)) PathSeen?.Invoke(p.ProcessName, path);
+            if (path.Length > 0 && !Paused && _paths.TryAdd(path, 0)) PathSeen?.Invoke(p.ProcessName, path);
             return v2;
         }
         catch { return ("Unknown", ""); }

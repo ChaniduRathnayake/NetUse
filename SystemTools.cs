@@ -186,11 +186,34 @@ public static class StartupTask
     public static (bool on, string? note, bool problem) CheckAndUpgrade()
     {
         var s = State();
-        if (s != Kind.Legacy) return (s == Kind.Current, null, false);
+        if (s == Kind.Current) return (true, RefreshCopy(), false);
+        if (s != Kind.Legacy) return (false, null, false);
         if (Enable(out var err))
             return (true, "Start with Windows now goes through a protected system task, so other programs can no longer slip code into NetUse when it starts at sign-in.", false);
         Sys.Run("schtasks", "/Delete", "/TN", TaskName, "/F");
         return (false, $"Start with Windows was turned off: the old start-up entry could be misused by other programs and couldn't be updated ({err}). Turn it on again in Settings.", true);
+    }
+
+    /// <summary>
+    /// You ran a different NetUse build (as administrator) while Start with Windows is on: the protected copy in Program
+    /// Files is brought up to date, so sign-in starts the version you use. Same copy rules as turning the setting on.
+    /// </summary>
+    private static string? RefreshCopy()
+    {
+        try
+        {
+            string exe = Environment.ProcessPath ?? "", target = CopyPath;
+            if (!IsSingleFile || PathsEqual(exe, target) || !File.Exists(target)) return null;
+            byte[]? running = Images.Loaded(null);
+            if (running == null) return null;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            using (var fs = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read))
+                if (sha.ComputeHash(fs).AsSpan().SequenceEqual(System.Security.Cryptography.SHA256.HashData(running))) return null;
+            return InstallCopy(target, out var err)
+                ? "Start with Windows now starts this version of NetUse (its protected copy in Program Files was updated)."
+                : "Start with Windows still starts an older NetUse: its copy in Program Files couldn't be updated (" + err + ").";
+        }
+        catch (Exception ex) { return "Start with Windows still starts an older NetUse: " + ex.Message; }
     }
 
     public static bool Enable(out string error)

@@ -101,13 +101,14 @@ public partial class MainWindow : Window
         (_theme switch { "light" => ThemeLight, "darkblue" => ThemeBlue, _ => ThemeDark }).IsChecked = true;
         AboutText.Text = $"NetUse {typeof(MainWindow).Assembly.GetName().Version?.ToString(3)}  ·  Data folder: {Database.Dir}";
 
+        InitRouting();
         SetupTray();
         _mon.AppSeen += OnAppSeen;
         _mon.PathSeen += OnPathSeen;
         _mon.Start();
         _timer.Tick += (_, _) => OnTick();
         _timer.Start();
-        Application.Current.SessionEnding += (_, _) => { _quit = true; SafeFlush(); };
+        Application.Current.SessionEnding += (_, _) => { _quit = true; SafeFlush(); _routing?.Dispose(); };
 
         UpdateAlertBadge();
         CheckPlan();
@@ -262,6 +263,7 @@ public partial class MainWindow : Window
             case "Usage": RefreshUsage(); break;
             case "Firewall": RefreshFw(); break;
             case "Network": RefreshNetwork(); break;
+            case "Routing": RefreshRouting(); _routing?.RefreshPublic(false); break;
             case "Alerts": RefreshAlerts(); break;
             case "System": RefreshSystem(true); break;
         }
@@ -292,6 +294,7 @@ public partial class MainWindow : Window
 
         CheckSpikes();
         FlushAlertSummaries();
+        if (_routing != null) _routing.Watching = _page == "Routing" && IsVisible && WindowState != WindowState.Minimized;
         if (_tick % 10 == 0) SafeFlush();
         if (_tick % 30 == 0) CheckPlan();
         if (_tick % 3600 == 0) _db.Prune(_db.GetInt("retention", 90));
@@ -582,6 +585,9 @@ public partial class MainWindow : Window
         _trayBar = new System.Windows.Forms.ToolStripMenuItem("Taskbar widget") { Checked = _db.GetBool("widgetBar", false) };
         _trayBar.Click += (_, _) => ShowBar(!_trayBar.Checked);
         menu.Items.Add(_trayBar);
+        _trayRouting = new System.Windows.Forms.ToolStripMenuItem("App routing") { Checked = _routing?.Enabled == true, Enabled = _routing != null };
+        _trayRouting.Click += (_, _) => SetRouting(!_trayRouting.Checked);
+        menu.Items.Add(_trayRouting);
         _trayPause = new System.Windows.Forms.ToolStripMenuItem("Pause monitoring");
         _trayPause.Click += (_, _) => SetPaused(!_mon.Paused);
         menu.Items.Add(_trayPause);
@@ -611,6 +617,8 @@ public partial class MainWindow : Window
         _float?.Close();
         _bar?.Close();
         _sensors?.Dispose();
+        _mon.Router = null;
+        _routing?.Dispose(); // routes and filters removed: every app is back on Windows' normal routing
         _mon.Dispose();
         Application.Current.Shutdown();
     }

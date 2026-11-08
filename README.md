@@ -27,6 +27,7 @@
 | **Usage** | Apps, Hosts and Traffic-type columns. Click an item to filter the other two. Each host shows its **destination country flag**. Incoming/outgoing and WAN/LAN split, plus a sortable apps table. Per-minute usage can be exported to CSV from Settings. |
 | **Firewall** | One switch per app that blocks or allows its incoming and outgoing traffic through Windows Firewall rules. Shows Windows Firewall status, and notices when a rule is deleted outside NetUse. |
 | **Network** | Active connections, open (listening) ports, and devices on your local network, with an on-demand subnet scan. |
+| **Routing** | **App Routing**: send chosen apps through the network you pick (Wi-Fi, Ethernet, USB tethering, a VPN…) while everything else follows Windows' normal routing. One master switch (also in the tray), live list of every network with its public address, country and provider, per-app network choice, automatic fallback when a network drops and return once it's steady for 5 s. No driver. See [docs/app-routing.md](docs/app-routing.md). |
 | **Alerts** | New app, an app running from a **new location** (a look-alike `chrome.exe` in Temp, for example), new device, Remote Desktop connection, Wi-Fi access-point changes (evil-twin detection), hosts-file changes, traffic spikes, **download / upload speed, CPU and memory above a threshold**, data plan and firewall changes. Filters, mark-read, delete, and a discreet mode with no pop-ups. |
 | **System** | CPU and memory graphs, drives and network adapters. |
 
@@ -91,6 +92,7 @@ NetUse runs elevated. Its threat model is a program running as you *without* adm
 - .NET startup hooks are disabled. CSV export neutralises spreadsheet formulas in app names.
 - Country flags come from a table built into NetUse, so no address is ever sent to a lookup service. Host-name lookups can be turned off in Settings.
 - Builds fail on any package with a known moderate or worse vulnerability, and packages come only from nuget.org (`nuget.config`).
+- **App Routing** uses only documented Windows APIs (no third-party driver). Its settings are admin-only. Its IPv6 filters vanish with NetUse (dynamic WFP session). Its routes are temporary and removed when NetUse exits. It never routes gateways, DNS servers, local addresses or another program's host routes. The public-address lookup goes only to the HTTPS address in its settings, without cookies, redirects or a proxy.
 
 ## Build from source
 
@@ -126,6 +128,7 @@ NetUse is Windows-only. It relies on kernel ETW tracing and Windows Firewall, so
 | `Program.cs`, `Launcher.cs` | Entry point; the SYSTEM sign-in launcher, environment cleaning and tampering checks |
 | `Trust.cs` | Authenticode signature checks (WinVerifyTrust, catalogs) and copying exactly the running files |
 | `Wifi.cs` | Current Wi-Fi connection through the Native Wifi API |
+| `Routing/`, `MainWindow.Routing.cs` | App Routing: engine, routes, adapters, rules, IPv6 guard (WFP), public address lookup, and its page |
 | `Widgets.cs` | Taskbar and floating widgets, adapter speed, CPU clock and temperature sensors |
 | `GeoIp.cs`, `Resources/` | Offline IP-to-country lookup and flag images |
 | `AboutWindow.cs` | About NetUse |

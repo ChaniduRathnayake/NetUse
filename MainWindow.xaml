@@ -132,6 +132,8 @@
           <RadioButton Style="{StaticResource TopNav}" local:Ui.Glyph="&#xEB05;" Content="Usage" Tag="Usage" Checked="Nav_Checked"/>
           <RadioButton Style="{StaticResource TopNav}" local:Ui.Glyph="&#xEA18;" Content="Firewall" Tag="Firewall" Checked="Nav_Checked"/>
           <RadioButton Style="{StaticResource TopNav}" local:Ui.Glyph="&#xE839;" Content="Network" Tag="Network" Checked="Nav_Checked"/>
+          <RadioButton x:Name="NavRouting" Style="{StaticResource TopNav}" local:Ui.Glyph="&#xE8AB;" Content="Routing" Tag="Routing" Checked="Nav_Checked"
+                       AutomationProperties.Name="App Routing"/>
           <Grid>
             <RadioButton x:Name="NavAlerts" Style="{StaticResource TopNav}" local:Ui.Glyph="&#xEA8F;" Content="Alerts" Tag="Alerts" Checked="Nav_Checked"/>
             <Border x:Name="AlertsBadge" Background="{DynamicResource Danger}" CornerRadius="8" MinWidth="16" Height="16" Padding="4,0"
@@ -866,6 +868,64 @@
           </Grid>
         </Border>
       </Grid>
+
+      <!-- ============ App Routing (send chosen apps through a chosen network) ============ -->
+      <ScrollViewer x:Name="PageRouting" Tag="Routing" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Focusable="False">
+        <StackPanel Margin="0,0,6,0">
+          <local:PageHeader x:Name="RtHeader" Title="App Routing" Subtitle="Send chosen apps through the network you pick. Everything else follows Windows.">
+            <StackPanel Orientation="Horizontal">
+              <Button x:Name="RtAddBtn" Content="Add app" Click="RtAdd_Click" Margin="0,0,8,0" AutomationProperties.Name="Add an app to route"/>
+              <Button Style="{StaticResource IconBtn}" local:Ui.Glyph="&#xE72C;" Click="RtRefresh_Click" ToolTip="Refresh networks" AutomationProperties.Name="Refresh networks"/>
+            </StackPanel>
+          </local:PageHeader>
+
+          <Border Style="{StaticResource Panel}" Margin="0,0,0,18" Padding="18,14">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Border x:Name="RtStateIcon" Width="40" Height="40" CornerRadius="10" Background="{DynamicResource MutedFill}">
+                <TextBlock x:Name="RtStateGlyph" Text="&#xE8AB;" Style="{StaticResource Glyph}" FontSize="18" Foreground="{DynamicResource TextMuted}" HorizontalAlignment="Center"/>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center">
+                <TextBlock x:Name="RtStateText" Style="{StaticResource H2}" Text="App Routing is off"/>
+                <TextBlock x:Name="RtStateSub" Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                <TextBlock x:Name="RtError" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+              </StackPanel>
+              <CheckBox x:Name="SwRouting" Grid.Column="2" Style="{StaticResource Switch}" VerticalAlignment="Center" Margin="12,0,0,0"
+                        Checked="SwRouting_Click" Unchecked="SwRouting_Click" AutomationProperties.Name="App Routing on or off"/>
+            </Grid>
+          </Border>
+
+          <TextBlock Text="ROUTED APPS" Style="{StaticResource Cap}" Margin="2,0,0,8"/>
+          <Border Style="{StaticResource Panel}" Padding="16,6" Margin="0,0,0,18">
+            <StackPanel>
+              <StackPanel x:Name="RtRules"/>
+              <local:EmptyState x:Name="RtEmpty" Glyph="&#xE8AB;" Title="No routed apps yet" Text="Add an app, then choose the network it should use." Visibility="Collapsed"/>
+            </StackPanel>
+          </Border>
+
+          <TextBlock Text="NETWORKS" Style="{StaticResource Cap}" Margin="2,0,0,8"/>
+          <Border Style="{StaticResource Panel}" Padding="16,6" Margin="0,0,0,18">
+            <StackPanel x:Name="RtNetworks"/>
+          </Border>
+
+          <TextBlock Text="SETTINGS" Style="{StaticResource Cap}" Margin="2,0,0,8"/>
+          <Border Style="{StaticResource Panel}" Padding="20,0" Margin="0,0,0,12">
+            <StackPanel Margin="0,-1,0,0">
+              <local:SettingRow Title="Default network" Description="Apps set to “Default network” use this one.">
+                <Button x:Name="RtDefaultBtn" Style="{StaticResource BtnSecondary}" Click="RtDefault_Click" MinWidth="170" AutomationProperties.Name="Default network"/>
+              </local:SettingRow>
+              <local:SettingRow Title="Move open connections" Description="When a routed app's connection starts on another network, close it so the app reconnects through its own network right away. Off: only its new connections move.">
+                <CheckBox x:Name="SwRtMove" Style="{StaticResource Switch}" Checked="SwRtMove_Click" Unchecked="SwRtMove_Click" AutomationProperties.Name="Move open connections"/>
+              </local:SettingRow>
+              <local:SettingRow x:Name="RtLookupRow" Title="Show each network's public address" Description="Asks ipinfo.io through each network for its public address, country and provider. Nothing else is sent.">
+                <CheckBox x:Name="SwRtLookup" Style="{StaticResource Switch}" Checked="SwRtLookup_Click" Unchecked="SwRtLookup_Click" AutomationProperties.Name="Show public addresses"/>
+              </local:SettingRow>
+            </StackPanel>
+          </Border>
+          <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11.5" Margin="2,0,2,8"
+                     Text="How it works: NetUse routes the addresses a routed app talks to through that app's network, so other apps reaching the same servers use it too. A first connection to a new server can start on the default route; NetUse moves it within about a second. Routed apps use IPv4. When a network drops, its apps use Windows' normal route until it has been back for 5 seconds. Turning App Routing off, or closing NetUse, removes everything."/>
+        </StackPanel>
+      </ScrollViewer>
 
       <!-- ============ System (hardware resources) ============ -->
       <ScrollViewer x:Name="PageSystem" Tag="System" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Focusable="False">
