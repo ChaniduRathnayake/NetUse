@@ -14,6 +14,7 @@ static class IconMaker
     [STAThread]
     static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--from") return FromArtwork(args[1], args[2]);
         string outDir = args.Length > 0 ? args[0] : ".";
         Directory.CreateDirectory(outDir);
         var images = new List<(int size, byte[] png)>();
@@ -22,6 +23,97 @@ static class IconMaker
         File.WriteAllBytes(Path.Combine(outDir, "app.png"), Png(Render(128)));
         File.WriteAllBytes(Path.Combine(outDir, "preview.png"), Png(Preview()));
         Console.WriteLine("wrote app.ico (" + string.Join(", ", Sizes) + "), app.png, preview.png");
+        return 0;
+    }
+
+    /// <summary>
+    /// Icon from finished artwork on a white background: the white connected to the image border becomes transparent
+    /// (its grey shadow becomes a see-through shadow), the icon is cropped square and resampled to every size.
+    /// </summary>
+    static int FromArtwork(string file, string outDir)
+    {
+        Directory.CreateDirectory(outDir);
+        var src = new FormatConvertedBitmap(BitmapFrame.Create(new Uri(Path.GetFullPath(file)), BitmapCreateOptions.None, BitmapCacheOption.OnLoad), PixelFormats.Bgra32, null, 0);
+        int w = src.PixelWidth, h = src.PixelHeight, stride = w * 4;
+        var px = new byte[h * stride];
+        src.CopyPixels(px, stride, 0);
+        byte Min(int i) => Math.Min(px[i], Math.Min(px[i + 1], px[i + 2]));
+        // flood fill the light background from the border
+        var bg = new bool[w * h];
+        var q = new Queue<int>();
+        void Seed(int x, int y) { int k = y * w + x; if (!bg[k] && Min(k * 4) >= 200) { bg[k] = true; q.Enqueue(k); } }
+        for (int x = 0; x < w; x++) { Seed(x, 0); Seed(x, h - 1); }
+        for (int y = 0; y < h; y++) { Seed(0, y); Seed(w - 1, y); }
+        while (q.Count > 0)
+        {
+            int k = q.Dequeue(), x = k % w, y = k / w;
+            if (x > 0) Seed(x - 1, y);
+            if (x < w - 1) Seed(x + 1, y);
+            if (y > 0) Seed(x, y - 1);
+            if (y < h - 1) Seed(x, y + 1);
+        }
+        int minX = w, minY = h, maxX = 0, maxY = 0;
+        for (int k = 0; k < w * h; k++)
+        {
+            int i = k * 4;
+            if (bg[k])
+            {
+                // un-matte from white: grey over white = black at (1 - grey) opacity
+                double lum = (px[i] + px[i + 1] + px[i + 2]) / 3.0;
+                byte a = (byte)Math.Clamp((int)Math.Round((1 - lum / 255.0) * 255 * 1.15), 0, 255);
+                px[i] = px[i + 1] = px[i + 2] = 0;
+                px[i + 3] = a < 6 ? (byte)0 : a;
+            }
+            else px[i + 3] = 255;
+            if (px[i + 3] > 24) { int x = k % w, y = k / w; minX = Math.Min(minX, x); maxX = Math.Max(maxX, x); minY = Math.Min(minY, y); maxY = Math.Max(maxY, y); }
+        }
+        var full = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, px, stride);
+        int side = Math.Max(maxX - minX, maxY - minY) + 1;
+        side += side / 40; // a little air around it
+        double cx = (minX + maxX) / 2.0, cy = (minY + maxY) / 2.0;
+        var crop = new Rect(cx - side / 2.0, cy - side / 2.0, side, side);
+        Console.WriteLine($"artwork {w}x{h}, icon bounds {minX},{minY}-{maxX},{maxY}, square {side}px");
+
+        BitmapSource At(int size)
+        {
+            var dv = new DrawingVisual();
+            RenderOptions.SetBitmapScalingMode(dv, BitmapScalingMode.Fant);
+            using (var dc = dv.RenderOpen())
+            {
+                double k = size / (double)side;
+                dc.PushTransform(new MatrixTransform(k, 0, 0, k, -crop.X * k, -crop.Y * k));
+                dc.DrawImage(full, new Rect(0, 0, w, h));
+                dc.Pop();
+            }
+            var bmp = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+            bmp.Render(dv);
+            return bmp;
+        }
+        var images = new List<(int size, byte[] png)>();
+        foreach (int s in Sizes) images.Add((s, Png(At(s))));
+        WriteIco(Path.Combine(outDir, "app.ico"), images);
+        File.WriteAllBytes(Path.Combine(outDir, "app.png"), Png(At(128)));
+        // preview: every size on light and dark
+        var pv = new DrawingVisual();
+        using (var dc = pv.RenderOpen())
+        {
+            dc.DrawRectangle(new SolidColorBrush(C(0xFFF3F4F6)), null, new Rect(0, 0, 900, 150));
+            dc.DrawRectangle(new SolidColorBrush(C(0xFF111827)), null, new Rect(0, 150, 900, 150));
+            double x = 16;
+            foreach (int s in Sizes)
+            {
+                if (s == 256) continue;
+                var img = At(s);
+                dc.DrawImage(img, new Rect(x, 75 - s / 2.0, s, s));
+                dc.DrawImage(img, new Rect(x, 225 - s / 2.0, s, s));
+                x += s + 18;
+            }
+            dc.DrawImage(At(256), new Rect(640, 22, 256, 256));
+        }
+        var pvb = new RenderTargetBitmap(900, 300, 96, 96, PixelFormats.Pbgra32);
+        pvb.Render(pv);
+        File.WriteAllBytes(Path.Combine(outDir, "preview.png"), Png(pvb));
+        Console.WriteLine("wrote app.ico, app.png, preview.png");
         return 0;
     }
 

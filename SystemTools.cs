@@ -509,6 +509,22 @@ public static class HostNames
     public static void Load(Dictionary<string, string> saved) { foreach (var kv in saved) Cache[kv.Key] = kv.Value; }
     public static void ClearMemory() => Cache.Clear();
 
+    /// <summary>
+    /// A name a program looked up and got this address for (Windows' DNS client events). Better than the reverse (PTR)
+    /// name, which is often a provider's server name; learned locally, nothing is sent.
+    /// </summary>
+    public static void Learn(string ip, string name)
+    {
+        if (ip.Length == 0 || name.Length == 0 || Net.WellKnown(ip).Length > 0) return;
+        if (Cache.TryGetValue(ip, out var had) && had == name) return;
+        if (Cache.Count > 200_000) Cache.Clear();
+        Cache[ip] = name;
+        if (Learned.Count < 20_000) Learned.Enqueue((ip, name));
+    }
+
+    /// <summary>Names learned from DNS answers, saved in batches by the main window.</summary>
+    public static readonly ConcurrentQueue<(string ip, string name)> Learned = new();
+
     /// <summary>Cached name, or "" (and a background lookup is started).</summary>
     public static string Get(string ip)
     {

@@ -23,29 +23,8 @@ public static class PublicIp
     public static async Task<PublicIpInfo?> LookupAsync(IPAddress local, string url, CancellationToken ct)
     {
         if (!RoutingConfig.ValidUrl(url)) return null;
-        var handler = new SocketsHttpHandler
-        {
-            UseProxy = false,                    // a system proxy would defeat the point
-            AllowAutoRedirect = false,
-            UseCookies = false,
-            PooledConnectionLifetime = TimeSpan.Zero,
-            ConnectTimeout = TimeSpan.FromSeconds(6),
-            ConnectCallback = async (ctx, token) =>
-            {
-                var s = new Socket(local.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-                try
-                {
-                    s.Bind(new IPEndPoint(local, 0));
-                    var addrs = (await Dns.GetHostAddressesAsync(ctx.DnsEndPoint.Host, local.AddressFamily, token)).Take(4).ToArray();
-                    if (addrs.Length == 0) throw new SocketException((int)SocketError.HostNotFound);
-                    await s.ConnectAsync(addrs, ctx.DnsEndPoint.Port, token);
-                    return new NetworkStream(s, ownsSocket: true);
-                }
-                catch { s.Dispose(); throw; }
-            },
-        };
-        using var http = new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(10), MaxResponseContentBufferSize = 64 * 1024 };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("NetUse");
+        using var http = BoundHttp.Create(local, TimeSpan.FromSeconds(10), 2);
+        http.MaxResponseContentBufferSize = 64 * 1024;
         http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         try
         {

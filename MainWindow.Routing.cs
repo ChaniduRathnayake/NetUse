@@ -123,7 +123,7 @@ public partial class MainWindow
 
         // App rows: built once per set of apps, then only updated in place. Rebuilding them on every change (each newly
         // routed address) recreated the switches, which then replayed their on-animation and looked like they flickered.
-        string rulesKey = string.Join("\u001e", rules.Select(r => r.Rule.Id + "\u001f" + string.Join(",", r.Rule.Exes)));
+        string rulesKey = string.Join("\u001e", rules.Select(r => r.Rule.Id + "\u001f" + string.Join(",", r.Rule.Exes) + "\u001f" + r.Rule.IsWebsite));
         if (rulesKey != _rtRulesKey)
         {
             RtRules.Children.Clear();
@@ -151,6 +151,185 @@ public partial class MainWindow
         }
 
         if (cfg.LookupPublicIp) _routing.RefreshPublic(false);
+        RefreshKillSwitch(cfg, adapters);
+    }
+
+    // ------------------------------------------------------------------ VPN kill switch
+    private void RefreshKillSwitch(RoutingConfig cfg, List<NetAdapter> adapters)
+    {
+        if (_routing == null) return;
+        SetQuiet(SwKill, cfg.KillSwitch);
+        SetQuiet(SwKillLan, cfg.KillAllowLan);
+        var vpn = adapters.FirstOrDefault(a => a.Id == cfg.VpnNetwork);
+        SetContent(KsVpnBtn, vpn != null ? NetLabel(vpn) : cfg.VpnNetwork.Length > 0 ? "Not connected" : "Choose…");
+        SetContent(KsAllowedBtn, cfg.KillAllowed.Count == 0 ? "None yet - add your VPN app" : string.Join(", ", cfg.KillAllowed.Select(Path.GetFileNameWithoutExtension).Take(3)) + (cfg.KillAllowed.Count > 3 ? $" +{cfg.KillAllowed.Count - 3}" : ""));
+        SetContent(KsOnlyBtn, cfg.KillOnly.Count == 0 ? "Every program" : string.Join(", ", cfg.KillOnly.Select(Path.GetFileNameWithoutExtension).Take(3)) + (cfg.KillOnly.Count > 3 ? $" +{cfg.KillOnly.Count - 3}" : ""));
+        KsAllowedBtn.ToolTip = cfg.KillAllowed.Count > 0 ? string.Join("\n", cfg.KillAllowed) : null;
+        KsOnlyBtn.ToolTip = cfg.KillOnly.Count > 0 ? string.Join("\n", cfg.KillOnly) : null;
+
+        string title, sub, fill, fg;
+        bool active = _routing.KillActive;
+        if (!cfg.KillSwitch) { title = "Kill switch is off"; sub = "Turn it on to block internet access outside your VPN, so nothing leaks when the VPN drops."; (fill, fg) = ("MutedFill", "TextMuted"); }
+        else if (cfg.VpnNetwork.Length == 0) { title = "Kill switch: choose your VPN network"; sub = "Nothing is blocked until you choose the VPN's adapter below."; (fill, fg) = ("WarningFill", "Warning"); }
+        else if (!active) { title = "Kill switch couldn't start"; sub = "Windows refused the filters; see the message below."; (fill, fg) = ("DangerFill", "Danger"); }
+        else if (vpn is not { Usable: true }) { title = "Kill switch is blocking: the VPN is down"; sub = (cfg.KillOnly.Count > 0 ? "The protected programs" : "Programs") + " can't use the internet until the VPN is back. Allowed programs and the local network still work."; (fill, fg) = ("DangerFill", "Danger"); }
+        else { title = "Kill switch is on  ·  VPN connected"; sub = cfg.KillOnly.Count > 0 ? $"{cfg.KillOnly.Count} program{(cfg.KillOnly.Count == 1 ? "" : "s")} can only use the internet through {NetLabel(vpn)}." : $"Programs can only use the internet through {NetLabel(vpn)}."; (fill, fg) = ("SuccessFill", "Success"); }
+        if (cfg.KillSwitch && cfg.KillAllowed.Count == 0 && active) sub += " Add your VPN app to the allowed programs, or it can't reconnect after a drop.";
+        SetText(KsStateText, title);
+        SetText(KsStateSub, sub);
+        KsStateIcon.SetResourceReference(Border.BackgroundProperty, fill);
+        KsStateGlyph.SetResourceReference(TextBlock.ForegroundProperty, fg);
+        string err = cfg.KillSwitch ? _routing.KillError : "";
+        SetText(KsError, err);
+        KsError.Visibility = err.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SwKill_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_ready || _syncing || _routing == null) return;
+        bool on = SwKill.IsChecked == true;
+        var (cfg, adapters, _) = _routing.Snapshot();
+        if (on && cfg.VpnNetwork.Length == 0)
+        {
+            // suggest the VPN adapter NetUse can see
+            var vpn = adapters.FirstOrDefault(a => a.Kind == NetKind.Vpn && a.Usable);
+            if (vpn != null) _routing.SetVpnNetwork(vpn.Id);
+        }
+        if (on && cfg.KillAllowed.Count == 0 && !Dialog.Confirm(this, "Turn on the kill switch?",
+                "Programs will only reach the internet through your VPN. If your VPN app isn't in “Always allowed programs”, it can't connect or reconnect - add it first (for NetMod: its program and helper programs).",
+                "Turn on", true))
+        {
+            SetQuiet(SwKill, false);
+            return;
+        }
+        _routing.SetKillSwitch(on);
+        RefreshRouting();
+    }
+
+    private void SwKillLan_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_ready || _syncing) return;
+        _routing?.SetKillAllowLan(SwKillLan.IsChecked == true);
+    }
+
+    private void KsVpn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_routing == null) return;
+        var (cfg, adapters, _) = _routing.Snapshot();
+        ShowNetworkMenu(KsVpnBtn, adapters, cfg.VpnNetwork, allowDefault: false, id => _routing.SetVpnNetwork(id));
+    }
+
+    private void KsAllowed_Click(object sender, RoutedEventArgs e) => EditProgramList(KsAllowedBtn, allowed: true);
+    private void KsOnly_Click(object sender, RoutedEventArgs e) => EditProgramList(KsOnlyBtn, allowed: false);
+
+    /// <summary>A menu listing the programs (click to remove), plus "Add programs…" (several at once) and running-app suggestions.</summary>
+    private void EditProgramList(FrameworkElement target, bool allowed)
+    {
+        if (_routing == null) return;
+        var (cfg, _, _) = _routing.Snapshot();
+        var list = (allowed ? cfg.KillAllowed : cfg.KillOnly).ToList();
+        void Save(List<string> l) { if (allowed) _routing.SetKillAllowed(l); else _routing.SetKillOnly(l); RefreshRouting(); }
+        var cm = new ContextMenu { PlacementTarget = target, Placement = PlacementMode.Bottom };
+        cm.Items.Add(Mi("Add programs…", "", () =>
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "Programs (*.exe)|*.exe", Multiselect = true,
+                Title = allowed ? "Programs allowed outside the VPN (your VPN app)" : "Programs that may only use the VPN" };
+            if (dlg.ShowDialog(this) != true) return;
+            Save(list.Concat(dlg.FileNames.Where(RoutingConfig.ValidExe)).Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        }, bold: true));
+        // running programs that look like VPN clients are offered first
+        var running = _mon.Apps.Values.Where(a => RoutingConfig.ValidExe(a.Path) && !list.Contains(a.Path, StringComparer.OrdinalIgnoreCase))
+            .GroupBy(a => a.Path, StringComparer.OrdinalIgnoreCase).Select(g => g.First())
+            .OrderByDescending(a => allowed && LooksLikeVpn(a.Path)).ThenByDescending(a => a.Sent + a.Recv).Take(10).ToList();
+        if (running.Count > 0)
+        {
+            cm.Items.Add(new Separator());
+            foreach (var a in running)
+            {
+                var mi = Mi(AppMeta.Get(a.Name, a.Path).Friendly + (allowed && LooksLikeVpn(a.Path) ? "  (VPN?)" : ""), "", () => Save(list.Append(a.Path).ToList()));
+                mi.Icon = new Image { Source = IconCache.Get(a.Path), Width = 16, Height = 16 };
+                mi.ToolTip = a.Path;
+                cm.Items.Add(mi);
+            }
+        }
+        if (list.Count > 0)
+        {
+            cm.Items.Add(new Separator());
+            foreach (var exe in list)
+            {
+                var mi = Mi($"Remove {Path.GetFileName(exe)}", "", () => Save(list.Where(x => !x.Equals(exe, StringComparison.OrdinalIgnoreCase)).ToList()));
+                mi.ToolTip = exe;
+                cm.Items.Add(mi);
+            }
+        }
+        cm.IsOpen = true;
+    }
+
+    private static bool LooksLikeVpn(string path)
+    {
+        string s = path.ToLowerInvariant();
+        return new[] { "vpn", "netmod", "v2ray", "xray", "tun2socks", "openvpn", "wireguard", "sstap", "psiphon", "hiddify", "nekoray", "clash", "sing-box" }.Any(s.Contains);
+    }
+
+    // ------------------------------------------------------------------ websites and schedules
+    private void RtAddSite_Click(object sender, RoutedEventArgs e) => EditWebsites(null);
+
+    private void EditWebsites(string? ruleId)
+    {
+        if (_routing == null) return;
+        var (cfg, adapters, _) = _routing.Snapshot();
+        var rule = ruleId == null ? null : cfg.Rules.FirstOrDefault(r => r.Id == ruleId);
+        var nets = new List<(string, string)> { ("", "Default network") };
+        nets.AddRange(adapters.Where(a => a.Kind != NetKind.Virtual || a.Usable).Select(a => (a.Id, NetLabel(a))));
+        var form = new FormDialog(this, rule == null ? "Route websites" : "Edit websites", "Save",
+            "Every app that opens these websites reaches them through the network you choose. Subdomains are included.");
+        var sites = form.Text("Websites", rule != null ? string.Join(", ", rule.Domains) : "",
+            "Separate with commas, for example: youtube.com, googlevideo.com, *.lk", 2000);
+        var net = rule == null ? form.Choice("Network", nets, cfg.DefaultNetwork.Length > 0 ? "" : adapters.FirstOrDefault(a => a.Usable && a.Kind != NetKind.Vpn)?.Id ?? "") : null;
+        form.Validate = () =>
+        {
+            var list = sites.Value.Split(new[] { ',', ' ', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            if (list.Length == 0) return "Enter at least one website.";
+            var bad = list.Where(d => RoutingConfig.CleanDomain(d).Length == 0).ToList();
+            if (bad.Count > 0) return $"Not a website name: {string.Join(", ", bad.Take(3))}";
+            if (list.Length > 64) return "Up to 64 websites in one rule.";
+            return null;
+        };
+        if (!form.Show()) return;
+        var domains = sites.Value.Split(new[] { ',', ' ', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        if (rule != null) _routing.SetDomains(rule.Id, domains);
+        else
+        {
+            string err = _routing.AddWebsites(domains, net!.Value);
+            if (err.Length > 0) Dialog.Confirm(this, "Couldn't add the websites", err, "OK", false);
+            else if (!cfg.Enabled && Dialog.Confirm(this, "Turn on App Routing?", "The websites are routed while App Routing is on.", "Turn on", false))
+                SetRouting(true);
+        }
+        RefreshRouting();
+    }
+
+    private void EditSchedule(string ruleId)
+    {
+        if (_routing == null) return;
+        var (cfg, _, _) = _routing.Snapshot();
+        var rule = cfg.Rules.FirstOrDefault(r => r.Id == ruleId);
+        if (rule == null) return;
+        var form = new FormDialog(this, $"Schedule for {rule.Name}", "Save",
+            "Route it only during these hours; outside them it follows Windows' normal route. Leave the hours empty to route it all the time.");
+        var hours = form.Text("Hours", rule.ScheduleFrom >= 0 ? FormDialog.FormatHours(rule.ScheduleFrom, rule.ScheduleTo).Replace('–', '-') : "",
+            "For example 00:00-08:00 (a night package) or 18:00-23:00.", 20);
+        var days = form.Days("On these days", rule.Days);
+        form.Validate = () =>
+        {
+            if (hours.Value.Length > 0 && !FormDialog.TryParseHours(hours.Value, out _, out _)) return "Enter the hours like 00:00-08:00, or leave them empty.";
+            if (hours.Value.Length > 0 && days.Value == "0") return "Choose at least one day.";
+            return null;
+        };
+        if (!form.Show()) return;
+        int d = int.TryParse(days.Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var dd) && dd > 0 ? dd : 127;
+        if (hours.Value.Length > 0 && FormDialog.TryParseHours(hours.Value, out int f, out int t)) _routing.SetRuleSchedule(ruleId, f, t, d);
+        else _routing.SetRuleSchedule(ruleId, -1, -1, 127);
+        RefreshRouting();
     }
 
     // set only when different, so an unchanged refresh touches nothing on screen
@@ -227,13 +406,19 @@ public partial class MainWindow
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        g.Children.Add(new Image { Source = IconCache.Get(v.Rule.Exes.FirstOrDefault() ?? ""), Width = 24, Height = 24, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left });
+        if (v.Rule.IsWebsite)
+        {
+            var globe = new TextBlock { Text = "", FontFamily = Ui.IconFont, FontSize = 20, VerticalAlignment = VerticalAlignment.Center };
+            globe.SetResourceReference(TextBlock.ForegroundProperty, "Primary");
+            g.Children.Add(globe);
+        }
+        else g.Children.Add(new Image { Source = IconCache.Get(v.Rule.Exes.FirstOrDefault() ?? ""), Width = 24, Height = 24, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left });
 
         var mid = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
         mid.Children.Add(ui.Name = Tb("", "TextPrimary", 13, true));
         mid.Children.Add(ui.Exes = Tb("", "TextMuted", 11.5));
         mid.Children.Add(ui.Badge = new ContentControl { Style = (Style)FindResource("Badge"), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) });
-        mid.ToolTip = string.Join("\n", v.Rule.Exes);
+        mid.ToolTip = string.Join("\n", v.Rule.Exes.Concat(v.Rule.Domains));
         Grid.SetColumn(mid, 1);
         g.Children.Add(mid);
 
@@ -261,7 +446,9 @@ public partial class MainWindow
         {
             var cur = ui.View;
             var cm = new ContextMenu { PlacementTarget = more, Placement = PlacementMode.Bottom };
-            cm.Items.Add(Mi("Add a helper program…", "", () => BrowseProgram(id)));
+            if (cur.Rule.IsWebsite) cm.Items.Add(Mi("Edit websites…", "", () => EditWebsites(id)));
+            else cm.Items.Add(Mi("Add a helper program…", "", () => BrowseProgram(id)));
+            cm.Items.Add(Mi(cur.Rule.ScheduleFrom >= 0 ? $"Schedule ({FormDialog.FormatHours(cur.Rule.ScheduleFrom, cur.Rule.ScheduleTo)})…" : "Schedule…", "", () => EditSchedule(id)));
             if (cur.Routed > 0) cm.Items.Add(Mi($"Forget {cur.Routed} learned address{(cur.Routed == 1 ? "" : "es")}", "", () => _routing?.Forget(id)));
             if (cur.Rule.Exes.Count > 1)
             {
@@ -284,7 +471,9 @@ public partial class MainWindow
         ui.View = v;
         var r = v.Rule;
         SetText(ui.Name, r.Name);
-        SetText(ui.Exes, string.Join(", ", r.Exes.Select(Path.GetFileName)));
+        string what = r.IsWebsite ? "Websites: " + string.Join(", ", r.Domains) : string.Join(", ", r.Exes.Select(Path.GetFileName));
+        if (r.ScheduleFrom >= 0) what += $"  ·  {FormDialog.FormatHours(r.ScheduleFrom, r.ScheduleTo)} {FormDialog.FormatDays(r.Days)}";
+        SetText(ui.Exes, what);
         var (status, kind) = RuleStatusText(v, cfg);
         SetContent(ui.Badge, status);
         if (!Equals(ui.Badge.Tag, kind)) ui.Badge.Tag = kind;
@@ -307,6 +496,7 @@ public partial class MainWindow
             RuleStatus.Waiting => ($"{net} is back, switching over in a few seconds", "warn"),
             RuleStatus.NoNetwork => (cfg.Enabled ? "Choose a network (Windows' normal route for now)" : "Off", cfg.Enabled ? "warn" : "off"),
             RuleStatus.Disabled => ("Disabled", "off"),
+            RuleStatus.Scheduled => ($"Outside its hours ({FormDialog.FormatHours(v.Rule.ScheduleFrom, v.Rule.ScheduleTo)}): Windows' normal route", "off"),
             _ => (cfg.Enabled ? "Starting…" : "Off (App Routing is off)", "off")
         };
     }

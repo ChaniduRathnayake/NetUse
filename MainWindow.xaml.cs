@@ -106,9 +106,10 @@ public partial class MainWindow : Window
         _mon.AppSeen += OnAppSeen;
         _mon.PathSeen += OnPathSeen;
         _mon.Start();
+        InitFeatures();
         _timer.Tick += (_, _) => OnTick();
         _timer.Start();
-        Application.Current.SessionEnding += (_, _) => { _quit = true; SafeFlush(); _routing?.Dispose(); };
+        Application.Current.SessionEnding += (_, _) => { _quit = true; SafeFlush(); DisposeFeatures(); _routing?.Dispose(); };
 
         UpdateAlertBadge();
         CheckPlan();
@@ -264,6 +265,7 @@ public partial class MainWindow : Window
             case "Firewall": RefreshFw(); break;
             case "Network": RefreshNetwork(); break;
             case "Routing": RefreshRouting(); _routing?.RefreshPublic(false); break;
+            case "Speed": RefreshSpeed(); break;
             case "Alerts": RefreshAlerts(); break;
             case "System": RefreshSystem(true); break;
         }
@@ -314,6 +316,7 @@ public partial class MainWindow : Window
             case "Network": if (_tick % 3 == 0 && !NetModeDevices.IsChecked.GetValueOrDefault()) RefreshNetwork(); break;
             case "Alerts": if (_alertsShown != _alertsVersion) RefreshAlerts(); break;
             case "System": RefreshSystem(_tick % 5 == 0); break;
+            case "Speed": if (_tick % 30 == 0) { RefreshPackages(); RefreshOutages(); } break;
         }
     }
 
@@ -399,7 +402,7 @@ public partial class MainWindow : Window
     {
         "New app" or "New location" or "Blocked" or "Remote Desktop" or "Evil twin" or "Tampering" => ("Danger", "bad", "Security"),
         "Spike" or "Speed" or "CPU" or "Memory" or "Data plan" or "New device" or "Hosts file" or "Firewall"
-            or "Startup error" or "Unsafe folder" or "Database" => ("Warning", "warn", "Warning"),
+            or "Startup error" or "Unsafe folder" or "Database" or "Outage" or "VPN" or "Data package" => ("Warning", "warn", "Warning"),
         _ => ("Info", "info", "Information")
     };
 
@@ -416,14 +419,20 @@ public partial class MainWindow : Window
         "CPU" or "Memory" => "",
         "Data plan" or "Spike" or "Speed" => "",
         "Firewall" or "Blocked" or "Allowed" => "",
+        "Outage" => "",
+        "VPN" => "",
+        "Update" => "",
+        "Data package" => "",
+        "Routing" => "",
         _ => ""
     };
 
     private void OnAppSeen(AppStats a) => Dispatcher.InvokeAsync(async () =>
     {
         if (!_known.Add(a.Name)) return;
-        if (!_db.GetBool("alertNew", true)) return;
         if (_firstRun && (DateTime.Now - _startedAt).TotalSeconds < 120) return; // learning period on first run
+        if (_db.GetBool("askNew", false)) Ask(a.Name, a.Path);
+        if (!_db.GetBool("alertNew", true)) return;
         var meta = AppMeta.Get(a.Name, a.Path);
         // name and company inside the file are just text: say which program file it is and who (if anyone) signed it
         string sig = await System.Threading.Tasks.Task.Run(() => AppMeta.SignatureNote(a.Path));
@@ -618,6 +627,7 @@ public partial class MainWindow : Window
         _bar?.Close();
         _sensors?.Dispose();
         _mon.Router = null;
+        DisposeFeatures();
         _routing?.Dispose(); // routes and filters removed: every app is back on Windows' normal routing
         _mon.Dispose();
         Application.Current.Shutdown();

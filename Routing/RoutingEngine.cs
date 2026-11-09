@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 
 namespace NetUse;
 
-public enum RuleStatus { Off, Disabled, Active, Fallback, Waiting, NoNetwork }
+public enum RuleStatus { Off, Disabled, Active, Fallback, Waiting, NoNetwork, Scheduled }
 
 /// <summary>A rule as the UI shows it.</summary>
 public sealed record RuleView(RoutingRule Rule, RuleStatus Status, NetAdapter? Network, int Routed);
@@ -52,6 +52,12 @@ public sealed class RoutingEngine : IDisposable
     private readonly Dictionary<HostRoute, string> _installed = new();              // our routes -> rule
     private readonly HashSet<IPAddress> _movedFrom = new();                         // adapters' addresses connections were moved to
     private readonly WfpGuard _wfp = new();
+    private readonly KillSwitch _kill = new();
+    private readonly Dictionary<string, HashSet<IPAddress>> _learned6 = new();    // website rule -> IPv6 answers (blocked)
+    private volatile List<RoutingRule> _rulesNow = new();                         // enabled rules, for the DNS thread
+    private volatile bool _killOn;
+    private readonly ConcurrentDictionary<int, (string path, DateTime at)> _pidPaths = new();
+    private DateTime _sitesResolved;
     private volatile Dictionary<string, RoutingRule> _byExe = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _on;
     private readonly ConcurrentDictionary<(string rule, IPAddress remote, int lport, int rport), byte> _seen = new();
@@ -86,7 +92,11 @@ public sealed class RoutingEngine : IDisposable
         NetworkChange.NetworkAvailabilityChanged += OnNetworkChanged;
         Queue(Evaluate);
         // every 2 s while routing is on or its page is open (catches what change events miss); idle otherwise
-        _poll = new Timer(_ => { if (_on || Watching) Queue(Evaluate); }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        _poll = new Timer(_ =>
+        {
+            if (_on || Watching || _killOn) Queue(Evaluate);
+            if (_on && DateTime.UtcNow - _sitesResolved > TimeSpan.FromMinutes(10)) ResolveSitesSoon();
+        }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
     }
 
     /// <summary>The Routing page is on screen: keep the network list live even while routing is off.</summary>
@@ -122,6 +132,43 @@ public sealed class RoutingEngine : IDisposable
     public void SetRuleNetwork(string rule, string id) => Change(c => Find(c, rule)?.Let(r => r.Network = id));
     public void SetRuleEnabled(string rule, bool on) => Change(c => Find(c, rule)?.Let(r => r.Enabled = on));
     public void RemoveRule(string rule) => Change(c => c.Rules.RemoveAll(r => r.Id == rule), forget: rule);
+
+    /// <summary>Routing only during these hours (minutes from midnight; -1 = always) on these days (bit 0 = Sunday).</summary>
+    public void SetRuleSchedule(string rule, int from, int to, int days) =>
+        Change(c => Find(c, rule)?.Let(r => { r.ScheduleFrom = from; r.ScheduleTo = to; r.Days = days; }));
+
+    /// <summary>Adds websites (any app opening them) as a rule. Returns an error message, or "".</summary>
+    public string AddWebsites(IEnumerable<string> domains, string network, string? toRule = null)
+    {
+        var clean = domains.Select(RoutingConfig.CleanDomain).Where(d => d.Length > 0).Distinct().ToList();
+        if (clean.Count == 0) return "Enter a website such as example.com or *.lk.";
+        string error = "";
+        Change(c =>
+        {
+            var target = toRule == null ? null : Find(c, toRule);
+            if (target != null) { target.Domains.AddRange(clean.Where(d => !target.Domains.Contains(d))); return; }
+            if (c.Rules.Count >= RoutingConfig.MaxRules) { error = "Up to 100 rules."; return; }
+            c.Rules.Add(new RoutingRule { Name = clean[0] + (clean.Count > 1 ? $" +{clean.Count - 1}" : ""), Domains = clean, Network = network });
+        });
+        ResolveSitesSoon();
+        return error;
+    }
+
+    public void SetDomains(string rule, IEnumerable<string> domains)
+    {
+        var clean = domains.Select(RoutingConfig.CleanDomain).Where(d => d.Length > 0).Distinct().ToList();
+        Change(c => Find(c, rule)?.Let(r => r.Domains = clean));
+        ResolveSitesSoon();
+    }
+
+    // ---- kill switch
+    public void SetKillSwitch(bool on) => Change(c => c.KillSwitch = on);
+    public void SetVpnNetwork(string id) => Change(c => c.VpnNetwork = id);
+    public void SetKillAllowLan(bool on) => Change(c => c.KillAllowLan = on);
+    public void SetKillAllowed(IEnumerable<string> exes) => Change(c => c.KillAllowed = exes.ToList());
+    public void SetKillOnly(IEnumerable<string> exes) => Change(c => c.KillOnly = exes.ToList());
+    public bool KillActive => _kill.Active;
+    public string KillError => _kill.LastError;
 
     /// <summary>Adds a program as a new rule (or to an existing rule). Returns an error message, or "".</summary>
     public string AddProgram(string exe, string? toRule = null)
@@ -191,6 +238,92 @@ public sealed class RoutingEngine : IDisposable
         Queue(() => OnFlow(rule.Id, local, remote, localPort, remotePort, tcp));
     }
 
+    /// <summary>
+    /// A program looked a name up (Windows' DNS client events). Websites in a rule, and the names routed apps look up,
+    /// are learned right away, so the routes usually exist before the first connection is made.
+    /// </summary>
+    public void ObserveDns(int pid, string name, IReadOnlyList<IPAddress> ips)
+    {
+        if (!_on) return;
+        string? path = null;
+        foreach (var r in _rulesNow)
+        {
+            bool hit = r.Domains.Count > 0 && r.MatchesDomain(name);
+            if (!hit && r.Exes.Count > 0)
+            {
+                path ??= PathOf(pid);
+                hit = path.Length > 0 && r.Exes.Contains(path, StringComparer.OrdinalIgnoreCase);
+            }
+            if (hit) { string id = r.Id; bool site = r.Domains.Count > 0; Queue(() => Learn(id, ips, site)); }
+        }
+    }
+
+    private string PathOf(int pid)
+    {
+        if (_pidPaths.TryGetValue(pid, out var c) && DateTime.UtcNow - c.at < TimeSpan.FromMinutes(1)) return c.path;
+        string path = ProcessPath(pid);
+        if (_pidPaths.Count > 2000) _pidPaths.Clear();
+        _pidPaths[pid] = (path, DateTime.UtcNow);
+        return path;
+    }
+
+    private void Learn(string ruleId, IReadOnlyList<IPAddress> ips, bool site)
+    {
+        lock (_gate)
+        {
+            if (Find(_cfg, ruleId) == null) return;
+            if (!_learned.TryGetValue(ruleId, out var set)) _learned[ruleId] = set = new HashSet<IPAddress>();
+            bool added = false;
+            foreach (var raw in ips)
+            {
+                var ip = raw.IsIPv4MappedToIPv6 ? raw.MapToIPv4() : raw;
+                if (Routable(ip))
+                {
+                    if (set.Count >= MaxLearnedPerRule || !set.Add(ip)) continue;
+                    added = true;
+                    try { _db.AddLearned(ruleId, ip.ToString(), Now); } catch (Exception ex) { App.Log(ex); }
+                }
+                else if (site && ip.AddressFamily == AddressFamily.InterNetworkV6 && !ip.IsIPv6LinkLocal && !IPAddress.IsLoopback(ip))
+                {
+                    if (!_learned6.TryGetValue(ruleId, out var s6)) _learned6[ruleId] = s6 = new HashSet<IPAddress>();
+                    if (s6.Count < 512 && s6.Add(ip)) added = true;
+                }
+            }
+            if (added) Reconcile();
+        }
+        Raise();
+    }
+
+    private int _resolving;
+
+    /// <summary>Looks up the plain names of website rules now and then, so their routes exist before anyone opens them.</summary>
+    private void ResolveSitesSoon()
+    {
+        if (Interlocked.Exchange(ref _resolving, 1) == 1) return;
+        _sitesResolved = DateTime.UtcNow;
+        Task.Run(async () =>
+        {
+            try
+            {
+                List<(string id, string name)> names;
+                lock (_gate) names = _cfg.Rules.Where(r => r.Enabled).SelectMany(r => r.Domains.Where(d => !d.StartsWith("*.")).Select(d => (r.Id, d))).Take(200).ToList();
+                foreach (var (id, name) in names)
+                {
+                    try
+                    {
+                        var ips = await Dns.GetHostAddressesAsync(name).WaitAsync(TimeSpan.FromSeconds(5));
+                        Queue(() => Learn(id, ips, true));
+                    }
+                    catch { /* not resolvable right now */ }
+                }
+            }
+            finally { Interlocked.Exchange(ref _resolving, 0); }
+        });
+    }
+
+    private static bool InSchedule(RoutingRule r, DateTime now) =>
+        r.ScheduleFrom < 0 || ((r.Days & (1 << (int)now.DayOfWeek)) != 0 && FormDialog.InWindow(r.ScheduleFrom, r.ScheduleTo, now.Hour * 60 + now.Minute));
+
     /// <summary>Public unicast IPv4 only (LAN, loopback, multicast and IPv6 aren't routed).</summary>
     public static bool Routable(IPAddress a)
     {
@@ -256,13 +389,14 @@ public sealed class RoutingEngine : IDisposable
                 RuleStatus st;
                 if (!_cfg.Enabled) st = RuleStatus.Off;
                 else if (!rule.Enabled) st = RuleStatus.Disabled;
+                else if (!InSchedule(rule, DateTime.Now)) st = RuleStatus.Scheduled;
                 else if (netId.Length == 0) st = RuleStatus.NoNetwork;
                 // unplugged (a USB-tethered phone disappears altogether) or no address/gateway: Windows' normal route
                 else if (net == null || !net.Usable) st = RuleStatus.Fallback;
                 else
                 {
                     bool wasActive = prev == RuleStatus.Active && _activeOn.GetValueOrDefault(rule.Id) == net.Id;
-                    bool justTurnedOn = prev is RuleStatus.Off or RuleStatus.Disabled or RuleStatus.NoNetwork;
+                    bool justTurnedOn = prev is RuleStatus.Off or RuleStatus.Disabled or RuleStatus.NoNetwork or RuleStatus.Scheduled;
                     bool stable = _usable.TryGetValue(net.Id, out var u) && now - u.since >= Stable;
                     // after a drop, wait until the network has been steady for 5 s (no flapping)
                     st = wasActive || justTurnedOn || stable ? RuleStatus.Active : RuleStatus.Waiting;
@@ -303,12 +437,14 @@ public sealed class RoutingEngine : IDisposable
         var never = _adapters.SelectMany(a => a.DnsServers.Append(a.Gateway4!)).Where(g => g != null).ToHashSet();
         var desired = new Dictionary<IPAddress, (HostRoute route, string rule)>();
         var noV6 = new List<string>();
+        var sites6 = new HashSet<IPAddress>();
         foreach (var rule in _cfg.Rules)
         {
             if (_status.GetValueOrDefault(rule.Id) != RuleStatus.Active || !_activeOn.TryGetValue(rule.Id, out var id)) continue;
             var net = _adapters.FirstOrDefault(a => a.Id == id);
             if (net?.IPv4 == null || net.Gateway4 == null) continue;
             noV6.AddRange(rule.Exes);
+            if (_learned6.TryGetValue(rule.Id, out var s6)) sites6.UnionWith(s6);
             if (!_learned.TryGetValue(rule.Id, out var set)) continue;
             foreach (var ip in set)
                 if (!foreign.Contains(ip) && !never.Contains(ip) && !desired.ContainsKey(ip))
@@ -330,10 +466,30 @@ public sealed class RoutingEngine : IDisposable
             if (rc is 0 or RouteTable.ERROR_OBJECT_ALREADY_EXISTS) { dirty |= !_installed.ContainsKey(r); _installed[r] = rule; }
             else LastError = $"Couldn't add a route to {r.Destination} (error {rc}).";
         }
-        try { _wfp.Set(noV6.Distinct(StringComparer.OrdinalIgnoreCase).ToList()); }
+        try { _wfp.Set(noV6.Distinct(StringComparer.OrdinalIgnoreCase).ToList()); _wfp.SetSites(sites6); }
         catch (Exception ex) { LastError = "IPv6 protection: " + ex.Message; }
         if (_wfp.LastError.Length > 0) LastError = "IPv6 protection: " + _wfp.LastError;
         if (dirty || before != _installed.Count) SaveInstalled();
+        ApplyKillSwitch(noV6);
+    }
+
+    /// <summary>
+    /// Kill switch filters from the settings. Allowed outside the VPN: the programs you allowed, NetUse itself (its speed
+    /// tests and checks go through each network on purpose), and apps App Routing is sending elsewhere right now.
+    /// It needs a VPN network chosen; without one it stays off rather than cutting all traffic.
+    /// </summary>
+    private void ApplyKillSwitch(List<string> routedNow)
+    {
+        bool on = _cfg.KillSwitch && _cfg.VpnNetwork.Length > 0;
+        var vpn = _adapters.FirstOrDefault(a => a.Id == _cfg.VpnNetwork);
+        var allowed = _cfg.KillAllowed.Concat(routedNow).Append(Environment.ProcessPath ?? "")
+            .Where(RoutingConfig.ValidExe).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var dns = _adapters.Where(a => a.Id != _cfg.VpnNetwork && a.Kind is not (NetKind.Vpn or NetKind.Virtual)).SelectMany(a => a.DnsServers).Distinct().ToList();
+        var siteRules = _cfg.Rules.Where(r => r.IsWebsite).Select(r => r.Id).ToHashSet();
+        var siteDest = _installed.Where(kv => siteRules.Contains(kv.Value)).Select(kv => kv.Key.Destination).ToList();
+        try { _kill.Apply(on, vpn, allowed, _cfg.KillOnly, _cfg.KillAllowLan, dns); _kill.SetDestinations(siteDest); }
+        catch (Exception ex) { LastError = "Kill switch: " + ex.Message; }
+        if (_kill.LastError.Length > 0) LastError = "Kill switch: " + _kill.LastError;
     }
 
     // ------------------------------------------------------------------ helpers
@@ -345,7 +501,7 @@ public sealed class RoutingEngine : IDisposable
             edit(_cfg);
             _cfg.Normalize();
             try { _cfg.Save(_dir); } catch (Exception ex) { LastError = "Couldn't save the settings: " + ex.Message; App.Log(ex); }
-            if (forget != null) { _learned.Remove(forget); try { _db.ForgetLearned(forget); } catch (Exception ex) { App.Log(ex); } }
+            if (forget != null) { _learned.Remove(forget); _learned6.Remove(forget); try { _db.ForgetLearned(forget); } catch (Exception ex) { App.Log(ex); } }
             RebuildIndex();
         }
         Queue(() =>
@@ -363,6 +519,8 @@ public sealed class RoutingEngine : IDisposable
             foreach (var e in r.Exes) map.TryAdd(e, r);
         _byExe = map;
         _on = _cfg.Enabled;
+        _rulesNow = _cfg.Rules.Where(r => r.Enabled).Select(r => new RoutingRule { Id = r.Id, Exes = r.Exes.ToList(), Domains = r.Domains.ToList() }).ToList();
+        _killOn = _cfg.KillSwitch;
     }
 
     /// <summary>
@@ -470,6 +628,7 @@ public sealed class RoutingEngine : IDisposable
             _installed.Clear();
             SaveInstalled();
             _wfp.Dispose();
+            _kill.Dispose();
             _on = false;
             if (!wasOn) return;
         }

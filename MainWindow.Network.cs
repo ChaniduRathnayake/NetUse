@@ -100,14 +100,21 @@ public partial class MainWindow
         foreach (var a in arp)
         {
             if (!known.Contains(a.Mac)) fresh.Add(a);
-            _db.UpsertDevice(a.Mac, a.Ip, HostNames.Get(a.Ip), now);
+            string name = HostNames.Get(a.Ip);
+            if (name.Length == 0)
+            {
+                // what the device calls itself (mDNS / NetBIOS); saved when the answer arrives
+                string mac = a.Mac;
+                name = LocalNames.Get(a.Ip, (ip, n) => Dispatcher.InvokeAsync(() => { try { _db.UpsertDevice(mac, ip, n, Now); } catch { } }));
+            }
+            _db.UpsertDevice(a.Mac, a.Ip, name, now);
         }
         if (baseline || fresh.Count == 0 || !_db.GetBool("alertDevice", true)) return;
         if (fresh.Count > 5)
             AddAlertRaw("New device", $"{fresh.Count} new devices appeared on your network (new network or scan).", "", "", "", "", 0, 0);
         else
             foreach (var d in fresh)
-                AddAlertRaw("New device", $"New device on your network: {d.Ip} ({d.Mac}{(DeviceScanner.IsRandomMac(d.Mac) ? ", private address" : "")}).",
+                AddAlertRaw("New device", $"New device on your network: {d.Ip} ({d.Mac}{(DeviceScanner.IsRandomMac(d.Mac) ? ", private address" : Oui.Vendor(d.Mac) is { Length: > 0 } v ? ", " + v : "")}).",
                     "", "", d.Ip, "", 0, 0);
     }
 
@@ -169,10 +176,11 @@ public partial class MainWindow
                     string addr = on ? ip! : d.Ip;
                     bool gw = net != null && addr == net.Gateway;
                     bool rnd = DeviceScanner.IsRandomMac(d.Mac);
+                    string vendor = rnd ? "" : Oui.Vendor(d.Mac);
                     string name = d.Name.Length > 0 ? d.Name : HostNames.Get(addr);
-                    if (name.Length == 0) name = gw ? "Router" : "Unknown device";
+                    if (name.Length == 0) name = gw ? "Router" : vendor.Length > 0 ? $"{vendor} device" : "Unknown device";
                     rows.Add(new DeviceView(gw ? "" : rnd ? "" : "", name, addr, d.Mac,
-                        gw ? "Router" : rnd ? "Private address" : "Device", on ? "ok" : "off",
+                        gw ? (vendor.Length > 0 ? $"Router · {vendor}" : "Router") : rnd ? "Private address" : vendor.Length > 0 ? vendor : "Device", on ? "ok" : "off",
                         Fmt.Relative(d.FirstSeen), on ? "Now" : Fmt.Relative(d.LastSeen), on, on ? "Online" : "Offline"));
                 }
                 var filtered = rows.Where(r => q.Length == 0 || r.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ||

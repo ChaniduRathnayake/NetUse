@@ -13,9 +13,24 @@ public sealed class RoutingRule
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "";
     public List<string> Exes { get; set; } = new();
+    /// <summary>Websites routed for every app: "example.com" (and its subdomains) or "*.lk".</summary>
+    public List<string> Domains { get; set; } = new();
     /// <summary>Network adapter GUID, or "" for the default network.</summary>
     public string Network { get; set; } = "";
     public bool Enabled { get; set; } = true;
+    /// <summary>Only routed between these minutes of the day (-1 = always), on these days (bit 0 = Sunday).</summary>
+    public int ScheduleFrom { get; set; } = -1;
+    public int ScheduleTo { get; set; } = -1;
+    public int Days { get; set; } = 127;
+
+    public bool IsWebsite => Exes.Count == 0 && Domains.Count > 0;
+
+    /// <summary>"example.com" matches it and its subdomains; "*.lk" matches every name under .lk.</summary>
+    public bool MatchesDomain(string name) => Domains.Any(d =>
+    {
+        string p = d.StartsWith("*.") ? d[2..] : d;
+        return name == p || name.EndsWith("." + p, StringComparison.Ordinal);
+    });
 }
 
 /// <summary>App Routing settings, stored as JSON in the admin-only data folder (%ProgramData%\NetUse\routing.json).</summary>
@@ -34,6 +49,17 @@ public sealed class RoutingConfig
     public bool LookupPublicIp { get; set; } = true;
     public string LookupUrl { get; set; } = DefaultLookupUrl;
     public List<RoutingRule> Rules { get; set; } = new();
+
+    // ---- VPN kill switch (independent of the App Routing switch)
+    public bool KillSwitch { get; set; }
+    /// <summary>Adapter GUID of the VPN.</summary>
+    public string VpnNetwork { get; set; } = "";
+    /// <summary>Allow traffic to the local network (printers, the router, DHCP…) outside the VPN.</summary>
+    public bool KillAllowLan { get; set; } = true;
+    /// <summary>Programs always allowed outside the VPN (the VPN client itself, so it can reconnect).</summary>
+    public List<string> KillAllowed { get; set; } = new();
+    /// <summary>Protect only these programs; empty = every program.</summary>
+    public List<string> KillOnly { get; set; } = new();
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.Never };
 
@@ -75,10 +101,34 @@ public sealed class RoutingConfig
             r.Network = CleanId(r.Network);
             r.Exes = (r.Exes ?? new()).Where(ValidExe).Select(System.IO.Path.GetFullPath)
                 .Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxExesPerRule).ToList();
+            r.Domains = (r.Domains ?? new()).Select(CleanDomain).Where(d => d.Length > 0).Distinct().Take(64).ToList();
             r.Name = Clean(r.Name, 80);
             if (r.Name.Length == 0 && r.Exes.Count > 0) r.Name = System.IO.Path.GetFileNameWithoutExtension(r.Exes[0]);
+            if (r.Name.Length == 0 && r.Domains.Count > 0) r.Name = r.Domains[0];
+            if (r.ScheduleFrom is < 0 or >= 1440 || r.ScheduleTo is < 0 or >= 1440 || r.ScheduleFrom == r.ScheduleTo) r.ScheduleFrom = r.ScheduleTo = -1;
+            r.Days = r.Days is > 0 and <= 127 ? r.Days : 127;
         }
-        Rules = Rules.Where(r => r.Exes.Count > 0).GroupBy(r => r.Id).Select(g => g.First()).ToList();
+        Rules = Rules.Where(r => r.Exes.Count > 0 || r.Domains.Count > 0).GroupBy(r => r.Id).Select(g => g.First()).ToList();
+        VpnNetwork = CleanId(VpnNetwork);
+        KillAllowed = (KillAllowed ?? new()).Where(ValidExe).Select(System.IO.Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).Take(32).ToList();
+        KillOnly = (KillOnly ?? new()).Where(ValidExe).Select(System.IO.Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).Take(64).ToList();
+    }
+
+    /// <summary>"Example.COM", "*.lk", "https://www.site.lk/path" -> "example.com", "*.lk", "www.site.lk"; "" if not a domain.</summary>
+    public static string CleanDomain(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        s = s.Trim().ToLowerInvariant();
+        if (s.Contains("://")) s = s[(s.IndexOf("://", StringComparison.Ordinal) + 3)..];
+        int cut = s.IndexOfAny(new[] { '/', ':', '?', '#' });
+        if (cut >= 0) s = s[..cut];
+        s = s.TrimEnd('.');
+        bool wild = s.StartsWith("*.");
+        string core = wild ? s[2..] : s;
+        if (core.Length is 0 or > 253 || !core.Contains('.') && !wild) return "";
+        if (core.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '-'))) return "";
+        if (core.Split('.').Any(l => l.Length is 0 or > 63)) return "";
+        return wild ? "*." + core : core;
     }
 
     public static bool ValidExe(string? path) =>

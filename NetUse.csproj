@@ -14,7 +14,7 @@
     <RootNamespace>NetUse</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.5.0</Version>
+    <Version>1.6.0</Version>
     <Product>NetUse</Product>
     <Company>NetUse</Company>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
@@ -55,6 +55,8 @@
     <Resource Include="Resources\Flags\*.png" />
     <!-- offline IP-to-country table (CC0, sapics/ip-location-db); rebuild with tools\make-geoip.py -->
     <EmbeddedResource Include="Resources\geoip.bin" LogicalName="NetUse.geoip.bin" />
+    <!-- MAC address -> device maker (IEEE registry); rebuild with tools\make-oui.py -->
+    <EmbeddedResource Include="Resources\oui.bin" LogicalName="NetUse.oui.bin" />
     <!-- build date shown in About -->
     <AssemblyMetadata Include="BuildDate" Value="$([System.DateTime]::Now.ToString('yyyy-MM-dd HH:mm'))" />
   </ItemGroup>

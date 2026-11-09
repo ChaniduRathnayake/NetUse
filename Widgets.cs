@@ -545,6 +545,20 @@ public static class Shell
         catch (Exception ex) { App.Log(ex); }
     }
 
+    /// <summary>Opens a report NetUse just saved (an .html file on a local drive) in the user's normal browser, through Explorer.</summary>
+    public static void OpenReport(string file)
+    {
+        if (!file.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || !SafePath.IsLocalFile(file) || !System.IO.File.Exists(file)) return;
+        try
+        {
+            var explorer = System.IO.Path.Combine(TrustedPaths.Windows, "explorer.exe");
+            var psi = new System.Diagnostics.ProcessStartInfo(explorer) { UseShellExecute = false };
+            psi.ArgumentList.Add(file);
+            System.Diagnostics.Process.Start(psi)?.Dispose();
+        }
+        catch (Exception ex) { App.Log(ex); }
+    }
+
     public static void TaskManager()
     {
         try

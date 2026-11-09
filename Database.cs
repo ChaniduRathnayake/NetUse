@@ -25,7 +25,8 @@ public class Database
     private readonly Dictionary<string, string> _cache = new();
 
     private static readonly string[] Tables =
-        { "usage", "daily", "flows", "hosts", "devices", "wifi", "apps", "alerts", "blocked", "settings", "app_paths", "route_learned" };
+        { "usage", "daily", "flows", "hosts", "devices", "wifi", "apps", "alerts", "blocked", "settings", "app_paths", "route_learned",
+          "net_usage", "networks", "quality", "outages", "speedtests", "app_domains" };
 
     /// <summary>Set when the database was set aside at startup (for an alert).</summary>
     public string? TamperNote { get; }
@@ -57,7 +58,14 @@ public class Database
                CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
                CREATE TABLE IF NOT EXISTS app_paths(path TEXT PRIMARY KEY COLLATE NOCASE, name TEXT NOT NULL, first_seen INTEGER);
                CREATE INDEX IF NOT EXISTS ix_app_paths_name ON app_paths(name COLLATE NOCASE);
-               CREATE TABLE IF NOT EXISTS route_learned(rule TEXT NOT NULL, ip TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(rule, ip));");
+               CREATE TABLE IF NOT EXISTS route_learned(rule TEXT NOT NULL, ip TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(rule, ip));
+               CREATE TABLE IF NOT EXISTS net_usage(hour INTEGER NOT NULL, adapter TEXT NOT NULL, sent INTEGER NOT NULL, recv INTEGER NOT NULL, PRIMARY KEY(hour, adapter));
+               CREATE TABLE IF NOT EXISTS networks(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, last_seen INTEGER NOT NULL);
+               CREATE TABLE IF NOT EXISTS quality(ts INTEGER NOT NULL, adapter TEXT NOT NULL, sent INTEGER, lost INTEGER, avg_ms REAL, jitter_ms REAL, PRIMARY KEY(ts, adapter));
+               CREATE TABLE IF NOT EXISTS outages(id INTEGER PRIMARY KEY AUTOINCREMENT, adapter TEXT NOT NULL, name TEXT NOT NULL, start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL);
+               CREATE TABLE IF NOT EXISTS speedtests(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, adapter TEXT NOT NULL, name TEXT NOT NULL,
+                                                     down REAL, up REAL, ping REAL, jitter REAL, error TEXT);
+               CREATE TABLE IF NOT EXISTS app_domains(app TEXT NOT NULL, domain TEXT NOT NULL, last_seen INTEGER NOT NULL, hits INTEGER NOT NULL, PRIMARY KEY(app, domain));");
         var cols = Query("PRAGMA table_info(alerts)", r => r.GetString(1)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var col in new[] { "app TEXT", "path TEXT", "remote TEXT", "proto TEXT", "sent INTEGER", "recv INTEGER" })
             if (!cols.Contains(col.Split(' ')[0])) Exec("ALTER TABLE alerts ADD COLUMN " + col);
@@ -352,6 +360,24 @@ public class Database
         Exec("INSERT OR REPLACE INTO hosts(ip,name,ts) VALUES($i,$n,$t)", ("$i", ip), ("$n", name),
             ("$t", DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
 
+    public void SetHostNames(IReadOnlyList<(string ip, string name)> rows)
+    {
+        if (rows.Count == 0) return;
+        lock (_lock)
+        {
+            using var c = Open();
+            using var tx = c.BeginTransaction();
+            using var cmd = Cmd(c, tx, "INSERT OR REPLACE INTO hosts(ip,name,ts) VALUES($i,$n,$t)", "$i", "$n", "$t");
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            foreach (var (ip, name) in rows)
+            {
+                cmd.Parameters[0].Value = ip; cmd.Parameters[1].Value = name; cmd.Parameters[2].Value = now;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+    }
+
     // ================================================================= devices / wifi
     public List<DeviceRow> GetDevices() =>
         Query("SELECT mac, COALESCE(ip,''), COALESCE(name,''), COALESCE(first_seen,0), COALESCE(last_seen,0) FROM devices",
@@ -375,11 +401,109 @@ public class Database
         if (days <= 0) return;
         long t = DateTimeOffset.UtcNow.AddDays(-days).ToUnixTimeSeconds();
         Exec(@"DELETE FROM usage WHERE ts<$t; DELETE FROM flows WHERE ts<$t; DELETE FROM daily WHERE day<$t;
-               DELETE FROM alerts WHERE ts<$t; DELETE FROM hosts WHERE ts<$t; DELETE FROM route_learned WHERE last_seen<$t;", ("$t", t));
+               DELETE FROM alerts WHERE ts<$t; DELETE FROM hosts WHERE ts<$t; DELETE FROM route_learned WHERE last_seen<$t;
+               DELETE FROM net_usage WHERE hour<$t; DELETE FROM quality WHERE ts<$t; DELETE FROM outages WHERE end_ts<$t;
+               DELETE FROM speedtests WHERE ts<$t; DELETE FROM app_domains WHERE last_seen<$t;", ("$t", t));
     }
 
     public void ClearHistory() =>
-        Exec("DELETE FROM usage; DELETE FROM daily; DELETE FROM flows; DELETE FROM apps; DELETE FROM app_paths; DELETE FROM alerts; DELETE FROM hosts; DELETE FROM devices; DELETE FROM wifi;");
+        Exec(@"DELETE FROM usage; DELETE FROM daily; DELETE FROM flows; DELETE FROM apps; DELETE FROM app_paths; DELETE FROM alerts; DELETE FROM hosts;
+               DELETE FROM devices; DELETE FROM wifi; DELETE FROM net_usage; DELETE FROM quality; DELETE FROM outages; DELETE FROM speedtests; DELETE FROM app_domains;");
+
+    // ================================================================= per network: usage, names, quality, outages, speed tests
+    public void AddNetUsage(long hour, IReadOnlyList<(string id, long sent, long recv)> rows)
+    {
+        if (rows.Count == 0) return;
+        lock (_lock)
+        {
+            using var c = Open();
+            using var tx = c.BeginTransaction();
+            using var cmd = Cmd(c, tx, @"INSERT INTO net_usage(hour,adapter,sent,recv) VALUES($h,$a,$s,$r)
+                                          ON CONFLICT(hour,adapter) DO UPDATE SET sent=sent+$s, recv=recv+$r;", "$h", "$a", "$s", "$r");
+            foreach (var (id, s, r) in rows)
+            {
+                cmd.Parameters[0].Value = hour; cmd.Parameters[1].Value = id; cmd.Parameters[2].Value = s; cmd.Parameters[3].Value = r;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+    }
+
+    /// <summary>(hour, adapter, bytes) for hours in [from, to).</summary>
+    public List<(long hour, string adapter, long bytes)> GetNetUsage(long from, long to) =>
+        Query("SELECT hour, adapter, sent+recv FROM net_usage WHERE hour>=$f AND hour<$t", r => (r.GetInt64(0), r.GetString(1), r.GetInt64(2)), ("$f", from), ("$t", to));
+
+    public void RememberNetwork(string id, string name, string kind) =>
+        Exec("INSERT OR REPLACE INTO networks(id,name,kind,last_seen) VALUES($i,$n,$k,$t)", ("$i", id), ("$n", name), ("$k", kind),
+            ("$t", DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+    /// <summary>Every network seen: id -> (name, kind).</summary>
+    public Dictionary<string, (string name, string kind)> GetNetworks() =>
+        Query("SELECT id, name, kind FROM networks", r => (r.GetString(0), r.GetString(1), r.GetString(2)))
+            .ToDictionary(x => x.Item1, x => (x.Item2, x.Item3));
+
+    public void AddQuality(long minute, string adapter, long sent, long lost, double avg, double jitter) =>
+        Exec("INSERT OR REPLACE INTO quality(ts,adapter,sent,lost,avg_ms,jitter_ms) VALUES($t,$a,$s,$l,$m,$j)",
+            ("$t", minute), ("$a", adapter), ("$s", sent), ("$l", lost), ("$m", avg), ("$j", jitter));
+
+    /// <summary>(adapter, probes, lost, average ms) per network for [from, to).</summary>
+    public List<(string adapter, long sent, long lost, double avg)> GetQuality(long from, long to) =>
+        Query(@"SELECT adapter, SUM(sent), SUM(lost), COALESCE(SUM(avg_ms*(sent-lost))/NULLIF(SUM(sent-lost),0),0) FROM quality
+                WHERE ts>=$f AND ts<$t GROUP BY adapter", r => (r.GetString(0), r.GetInt64(1), r.GetInt64(2), r.GetDouble(3)), ("$f", from), ("$t", to));
+
+    public void AddOutage(string adapter, string name, long start, long end) =>
+        Exec("INSERT INTO outages(adapter,name,start_ts,end_ts) VALUES($a,$n,$s,$e)", ("$a", adapter), ("$n", name), ("$s", start), ("$e", end));
+
+    public List<(string adapter, string name, long start, long end)> GetOutages(long from, int limit = 200) =>
+        Query("SELECT adapter, name, start_ts, end_ts FROM outages WHERE end_ts>=$f ORDER BY start_ts DESC LIMIT $l",
+            r => (r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3)), ("$f", from), ("$l", limit));
+
+    public void AddSpeed(SpeedResult s) =>
+        Exec("INSERT INTO speedtests(ts,adapter,name,down,up,ping,jitter,error) VALUES($t,$a,$n,$d,$u,$p,$j,$e)",
+            ("$t", s.At), ("$a", s.Network), ("$n", s.NetworkName), ("$d", s.DownMbps), ("$u", s.UpMbps), ("$p", s.PingMs), ("$j", s.JitterMs), ("$e", s.Error));
+
+    public List<SpeedResult> GetSpeeds(long from, int limit = 50) =>
+        Query("SELECT ts, adapter, name, down, up, ping, jitter, COALESCE(error,'') FROM speedtests WHERE ts>=$f ORDER BY ts DESC LIMIT $l",
+            r => new SpeedResult(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetDouble(3), r.GetDouble(4), r.GetDouble(5), r.GetDouble(6), r.GetString(7)),
+            ("$f", from), ("$l", limit));
+
+    /// <summary>Bytes an app (by process name, as recorded) used since a time; uses the usage table's app index.</summary>
+    public long AppBytesSince(string app, long from) =>
+        Query("SELECT COALESCE(SUM(sent+recv),0) FROM usage WHERE app=$a AND ts>=$f", r => r.GetInt64(0), ("$a", app), ("$f", from)).FirstOrDefault();
+
+    // ================================================================= names each app looked up (DNS)
+    public void AddAppDomains(IReadOnlyList<(string app, string domain)> rows, long now)
+    {
+        if (rows.Count == 0) return;
+        lock (_lock)
+        {
+            using var c = Open();
+            using var tx = c.BeginTransaction();
+            using var cmd = Cmd(c, tx, @"INSERT INTO app_domains(app,domain,last_seen,hits) VALUES($a,$d,$t,1)
+                                          ON CONFLICT(app,domain) DO UPDATE SET last_seen=$t, hits=hits+1;", "$a", "$d", "$t");
+            foreach (var (a, d) in rows)
+            {
+                cmd.Parameters[0].Value = a; cmd.Parameters[1].Value = d; cmd.Parameters[2].Value = now;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+    }
+
+    public List<(string domain, long lastSeen, long hits)> GetAppDomains(string app, int limit = 30) =>
+        Query("SELECT domain, last_seen, hits FROM app_domains WHERE app=$a ORDER BY last_seen DESC LIMIT $l",
+            r => (r.GetString(0), r.GetInt64(1), r.GetInt64(2)), ("$a", app), ("$l", limit));
+
+    /// <summary>The most recent names of every app (at most perApp each), for the Firewall page.</summary>
+    public Dictionary<string, List<string>> GetAllAppDomains(int perApp) =>
+        Query(@"SELECT app, domain FROM (SELECT app, domain, ROW_NUMBER() OVER (PARTITION BY app ORDER BY last_seen DESC) rn FROM app_domains)
+                WHERE rn<=$n ORDER BY app, rn", r => (r.GetString(0), r.GetString(1)), ("$n", perApp))
+            .GroupBy(x => x.Item1, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Item2).ToList(), StringComparer.OrdinalIgnoreCase);
+
+    public List<(string domain, long hits)> GetTopDomains(long from, int limit) =>
+        Query("SELECT domain, SUM(hits) h FROM app_domains WHERE last_seen>=$f GROUP BY domain ORDER BY h DESC LIMIT $l",
+            r => (r.GetString(0), r.GetInt64(1)), ("$f", from), ("$l", limit));
 
     public void ExportCsv(string file)
     {

@@ -38,8 +38,23 @@ Settings are in `%ProgramData%\NetUse\routing.json` (admin-only, like the rest o
 - **Routing is per address, not per socket.** Another app that talks to the same server (a shared CDN address, for example) also uses the routed network for that address. A website can make your browser contact many addresses, and they're all routed. NetUse never routes gateways, DNS servers, local-network addresses or addresses another program already has a host route for (such as a VPN client's route to its own server).
 - **The first connection to each new address starts on the default route** and is then moved, which can show as a reset to the app. Addresses are remembered, so this happens once per address, not on every visit.
 - **Name lookups (DNS) still use Windows' normal DNS.** Sites that pick a server by the DNS resolver's location may hand out a server near your VPN, but they still see your routed public address.
-- **VPN kill switches.** A VPN client that blocks all non-VPN traffic (a "kill switch") also blocks routed traffic. NetUse doesn't detect or work around VPN clients.
+- **VPN kill switches.** A VPN client's own kill switch (one that blocks all non-VPN traffic) also blocks routed traffic. NetUse doesn't detect or work around VPN clients. NetUse's own kill switch does allow what App Routing sends elsewhere on purpose.
 - **IPv6 TCP and UDP connections can't be closed from outside.** They end on their own when the feature turns off.
+- **Websites are matched by name lookups.** NetUse watches which addresses the names you listed resolve to (Windows' DNS client events, for every app) and routes those addresses. A browser using its own encrypted DNS (DNS over HTTPS) bypasses Windows' DNS client, so NetUse learns those addresses only from its every-10-minutes lookup of the listed names. Turn off "secure DNS" in the browser for exact results. Websites' IPv6 addresses are refused so browsers use IPv4, which is routed.
+- **Schedules** switch a rule on and off at the minute; connections already open move at the next check.
+
+## Websites
+
+**Add website** routes names such as `youtube.com` (with every subdomain) or `*.lk` (every name under `.lk`) through the network you choose, for every app. Edit the list later from the rule's **⋯** menu.
+
+## VPN kill switch
+
+The kill switch blocks internet access outside the VPN adapter you choose, with Windows Filtering Platform filters that exist only while NetUse runs.
+
+- **Always allowed:** loopback, the VPN adapter itself, the programs in *Always allowed programs* (add your VPN app and its helpers, for NetMod its program and its `v2ray`/`tun2socks` helpers, or it can't reconnect), NetUse, and what App Routing sends elsewhere on purpose. With *Allow the local network* on: your router, printers and other LAN devices, plus your networks' DNS servers.
+- **Protect:** every program, or only the ones you list (the rest use the internet normally).
+- When the VPN drops, protected programs can't reach the internet until it's back, and the Routing page says so.
+- Closing NetUse removes the filters.
 
 ## Why not a driver (yet)
 

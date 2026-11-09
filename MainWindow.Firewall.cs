@@ -49,6 +49,7 @@ public partial class MainWindow
             long now = Now;
             string q = FwSearch.Text.Trim();
             var hostCounts = _db.GetHostCounts();
+            var domains = _db.GetAllAppDomains(8);
 
             // Blocked apps must stay visible (and unblockable) even after "Clear history" removed them from apps.
             var apps = _db.GetApps();
@@ -80,7 +81,8 @@ public partial class MainWindow
                                  .ToList();
                 string details = (lines.Count > 0 ? string.Join("\n", lines) : "No open connections right now.")
                                  + "\n\n" + (a.Path.Length > 0 ? "Program  " + a.Path : "Program  (path unknown - system process)")
-                                 + (a.FirstSeen > 0 ? "\nFirst seen  " + Fmt.Time(a.FirstSeen) : "");
+                                 + (a.FirstSeen > 0 ? "\nFirst seen  " + Fmt.Time(a.FirstSeen) : "")
+                                 + (domains.TryGetValue(a.Name, out var sites) ? "\nWebsites  " + string.Join(", ", sites) : "");
 
                 cards.Add((new FwCard(IconCache.Get(a.Path), meta.Friendly, meta.Exe,
                     AppMeta.PublisherLabel(a.Path, meta.Publisher), a.Path,
@@ -111,6 +113,7 @@ public partial class MainWindow
                 : enabled ? $"Windows Firewall is on  ·  {profile} network" : "Windows Firewall is off – blocking apps has no effect";
             FwStateIcon.SetResourceReference(Border.BackgroundProperty, !known ? "MutedFill" : enabled ? "SuccessFill" : "DangerFill");
             FwStateGlyph.SetResourceReference(TextBlock.ForegroundProperty, !known ? "TextMuted" : enabled ? "Success" : "Danger");
+            RefreshLimits();
         }
         catch (Exception ex) { App.Log(ex); }
         finally

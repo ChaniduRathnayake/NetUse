@@ -71,7 +71,8 @@ public class NetworkMonitor : IDisposable
 
     public void Start()
     {
-        NetworkChange.NetworkAddressChanged += (_, _) => _local = LoadLocal();
+        LoadAdapters();
+        NetworkChange.NetworkAddressChanged += (_, _) => { _local = LoadLocal(); LoadAdapters(); };
         var t = new Thread(() =>
         {
             try
@@ -118,6 +119,29 @@ public class NetworkMonitor : IDisposable
         return set;
     }
 
+    // ------------------------------------------------------------------ bytes per network (data packages)
+    private volatile Dictionary<IPAddress, string> _ifByIp = new();
+    private readonly ConcurrentDictionary<string, long[]> _netBytes = new();
+    private readonly ConcurrentDictionary<string, byte> _named = new();
+    /// <summary>Networks seen in this session: id -> (name, kind), saved with the usage so history keeps their names.</summary>
+    public ConcurrentDictionary<string, (string name, NetKind kind)> Networks { get; } = new();
+
+    private void LoadAdapters()
+    {
+        try
+        {
+            var map = new Dictionary<IPAddress, string>();
+            foreach (var a in NetAdapters.List())
+            {
+                if (a.IPv4 != null) map[a.IPv4] = a.Id;
+                if (a.IPv6 != null) map[a.IPv6] = a.Id;
+                Networks[a.Id] = (a.Name, a.Kind);
+            }
+            _ifByIp = map;
+        }
+        catch (Exception ex) { App.Log(ex); }
+    }
+
     private bool IsSelf(IPAddress? a)
     {
         if (a == null || IPAddress.IsLoopback(a)) return true;
@@ -149,6 +173,11 @@ public class NetworkMonitor : IDisposable
         var (name, path) = Resolve(pid);
         Router?.Observe(path, !dSelf ? saddr! : daddr!, remote, lport, rport, proto == "TCP");
         if (Paused) return; // usage isn't recorded while paused (App Routing above still sees the traffic)
+
+        var local = !dSelf ? saddr! : daddr!;
+        if (local.IsIPv4MappedToIPv6) local = local.MapToIPv4();
+        if (_ifByIp.TryGetValue(local, out var netId))
+            Interlocked.Add(ref _netBytes.GetOrAdd(netId, _ => new long[2])[sent ? 0 : 1], bytes);
 
         if (!Apps.TryGetValue(name, out var s))
         {
@@ -209,6 +238,9 @@ public class NetworkMonitor : IDisposable
             }
         }
     }
+
+    /// <summary>Process name and program file of a process id (cached; "Unknown" when it has exited).</summary>
+    public (string name, string path) ProcessOf(int pid) => Resolve(pid);
 
     private (string name, string path) Resolve(int pid)
     {
@@ -273,6 +305,24 @@ public class NetworkMonitor : IDisposable
             }
             else if (++kv.Value.IdleFlushes > 30) RemoveFlow(kv.Key); // keep the map small
         }
+        var nets = new List<(string, long, long)>();
+        foreach (var kv in _netBytes)
+        {
+            long s = Interlocked.Exchange(ref kv.Value[0], 0), r = Interlocked.Exchange(ref kv.Value[1], 0);
+            if (s > 0 || r > 0) nets.Add((kv.Key, s, r));
+        }
+        try
+        {
+            db.AddNetUsage(now / 3600 * 3600, nets);
+            foreach (var (id, _, _) in nets)
+                if (Networks.TryGetValue(id, out var n) && _named.TryAdd(id, 0)) db.RememberNetwork(id, n.name, n.kind.ToString());
+        }
+        catch (Exception ex)
+        {
+            App.Log(ex);
+            foreach (var (id, s, r) in nets) { var c = _netBytes.GetOrAdd(id, _ => new long[2]); Interlocked.Add(ref c[0], s); Interlocked.Add(ref c[1], r); }
+        }
+
         try { db.AddUsage(rows, apps, flows, now); }
         catch
         {

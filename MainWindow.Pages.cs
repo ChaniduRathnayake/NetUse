@@ -157,6 +157,8 @@ public partial class MainWindow
         SwAlertHosts.IsChecked = _db.GetBool("alertHosts", true);
         SwAlertSpike.IsChecked = _db.GetBool("alertSpike", true);
         SwResolve.IsChecked = _db.GetBool("resolveHosts", true);
+        SwAsk.IsChecked = _db.GetBool("askNew", false);
+        SwUpdates.IsChecked = _db.GetBool("checkUpdates", true);
         SpikeBox.Text = _db.GetDouble("spikeMB", 10).ToString(CultureInfo.CurrentCulture);
         CapBox.Text = _db.GetDouble("capGB", 0).ToString(CultureInfo.CurrentCulture);
         BillBox.Text = _db.GetInt("billDay", 1).ToString(CultureInfo.CurrentCulture);

@@ -17,6 +17,15 @@ Speed widgets
   next to the clock and/or a small floating window: upload, download,
   CPU, memory, temperature and CPU clock. Right-click a widget for options.
 
+New in 1.6
+  Speed page: speed test per network, connection quality, outages and VPN
+  drops, data packages (also night packages) with 80% / 100% alerts.
+  Firewall page: app limits (data per day/week/month, blocked hours,
+  upload speed) and the websites each app looked up.
+  Routing page: route websites, schedules, and a VPN kill switch (add your
+  VPN app to "Always allowed programs" first).
+  Settings: Ask about new apps, usage reports, update check (notify only).
+
 Where data is kept
   Usage history and settings: C:\ProgramData\NetUse
 
