@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-  <!-- Draws NetUse's icon. Run from the repo root:
-       dotnet run --project tools/icon -- .
-       It writes app.ico (16-256 px, each size drawn separately) and app.png (128 px), plus preview.png. -->
+  <!-- Draws NetUse's icon. From the repo root run:   dotnet run (project tools/icon, then the output folder: .)
+       See the "Project layout" table in README.md for the exact command.
+       It writes app.ico (16 to 256 px, each size drawn separately), app.png (256 px) and preview.png. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

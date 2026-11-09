@@ -150,5 +150,5 @@ NetUse is Windows-only. It relies on kernel ETW tracing and Windows Firewall, so
 | `App.xaml`, `Themes/` | Design system (styles) and colour tokens; every colour is a named token in `Themes/*.xaml` |
 | `setup/` | Inno Setup installer script and portable-package readme |
 | `tools/make-geoip.py` | Rebuilds the country table |
-| `tools/icon/`, `art/` | Makes the app icon from the artwork: `dotnet run --project tools/icon -- --from art/icon-source.png .` writes `app.ico` (16–256 px) and `app.png` |
+| `tools/icon/` | Draws the app icon: `dotnet run --project tools/icon -- .` writes `app.ico` (16–256 px, each size drawn separately so the tray icon stays sharp), `app.png` and `preview.png`. `--from <image> <folder>` makes an icon from finished artwork instead (`art/` keeps earlier artwork) |
 | `build.bat` | Builds the exe, the portable zip and the installer |
